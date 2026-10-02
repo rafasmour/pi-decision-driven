@@ -1,8 +1,8 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import planModeExtension from "../examples/extensions/plan-mode/index.ts";
 import type { ExtensionAPI, ExtensionContext } from "../src/core/extensions/index.ts";
+import planModeExtension from "../src/extensions/plan-mode/index.ts";
 
 type CommandHandler = (args: string, ctx: ExtensionContext) => Promise<void> | void;
 type AgentEndHandler = (
@@ -30,7 +30,9 @@ function createAssistantMessage(text: string): AssistantMessage {
 	};
 }
 
-function setup(options: { activeTools?: string[]; selectChoice?: string; editorText?: string } = {}) {
+function setup(
+	options: { activeTools?: string[]; selectChoice?: string; editorText?: string; editorTexts?: string[] } = {},
+) {
 	let activeTools = options.activeTools ?? ["read", "bash", "edit", "write"];
 	const commands = new Map<string, CommandHandler>();
 	let agentEndHandler: AgentEndHandler | undefined;
@@ -61,12 +63,20 @@ function setup(options: { activeTools?: string[]; selectChoice?: string; editorT
 
 	planModeExtension(api);
 
+	let editorCall = 0;
 	const ctx = {
 		hasUI: true,
 		ui: {
 			notify: vi.fn(),
 			select: vi.fn(async () => options.selectChoice),
-			editor: vi.fn(async () => options.editorText),
+			editor: vi.fn(async () => {
+				if (options.editorTexts) {
+					const text = options.editorTexts[editorCall];
+					editorCall++;
+					return text;
+				}
+				return options.editorText;
+			}),
 			setStatus: vi.fn(),
 			setWidget: vi.fn(),
 			theme: {
@@ -74,7 +84,11 @@ function setup(options: { activeTools?: string[]; selectChoice?: string; editorT
 				strikethrough: (text: string) => text,
 			},
 		},
-		sessionManager: { getEntries: () => [] },
+		sessionManager: {
+			getEntries: () => [],
+			getBranch: () => [],
+			appendCustomEntry: vi.fn(() => 0),
+		},
 		isIdle: () => false,
 		hasPendingMessages: () => false,
 	} as unknown as ExtensionContext;
@@ -110,16 +124,8 @@ describe("plan-mode example extension", () => {
 
 		await runCommand("plan");
 
-		expect(activeTools()).toEqual(["read", "bash", "echo_tool", "grep", "find", "ls", "questionnaire"]);
-		expect(setActiveTools).toHaveBeenLastCalledWith([
-			"read",
-			"bash",
-			"echo_tool",
-			"grep",
-			"find",
-			"ls",
-			"questionnaire",
-		]);
+		expect(activeTools()).toEqual(["read", "bash", "echo_tool", "grep", "find", "ls"]);
+		expect(setActiveTools).toHaveBeenLastCalledWith(["read", "bash", "echo_tool", "grep", "find", "ls"]);
 
 		await runCommand("plan");
 
@@ -153,6 +159,7 @@ describe("plan-mode example extension", () => {
 		const { activeTools, runCommand, sendMessage, triggerAgentEnd } = setup({
 			activeTools: ["read", "bash", "edit", "write", "echo_tool"],
 			selectChoice: "Execute the plan (track progress)",
+			editorTexts: ["Ship the feature", "Tests pass"],
 		});
 
 		await runCommand("plan");

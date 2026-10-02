@@ -50,7 +50,9 @@ export function loadGoalCardFromBranch(branch: readonly SessionEntry[]): GoalCar
 	return undefined;
 }
 
-export function persistGoalCard(sessionManager: SessionManager, card: GoalCard): void {
+export type GoalCardSessionWriter = Pick<SessionManager, "appendCustomEntry">;
+
+export function persistGoalCard(sessionManager: GoalCardSessionWriter, card: GoalCard): void {
 	sessionManager.appendCustomEntry(GOAL_CARD_ENTRY, card);
 }
 
