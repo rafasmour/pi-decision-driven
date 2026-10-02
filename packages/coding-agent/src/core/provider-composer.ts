@@ -189,12 +189,29 @@ function applyModelOverride(model: Model<Api>, override: ModelsJsonModelOverride
 	};
 }
 
+function findJsonModelDefaults(
+	baseModels: readonly AnyModel[],
+	modelId: string,
+	api: string | undefined,
+	type: "chat" | "image" | "classifier",
+): AnyModel | undefined {
+	const candidates = baseModels.filter((model) => isModelType(model, type));
+	return (
+		candidates.find((model) => model.id === modelId) ??
+		(api ? candidates.find((model) => model.api === api) : undefined) ??
+		(type === "chat" ? candidates.find((model) => model.api === "openai-completions") : undefined) ??
+		candidates[0]
+	);
+}
+
 function modelFromJson(
 	providerId: string,
 	definition: ModelsJsonModel,
 	providerConfig: ModelsJsonProvider,
-	defaults: Model<Api> | undefined,
-): Model<Api> {
+	baseModels: readonly AnyModel[],
+): AnyModel {
+	const type = definition.type ?? "chat";
+	const defaults = findJsonModelDefaults(baseModels, definition.id, definition.api ?? providerConfig.api, type);
 	const api = definition.api ?? providerConfig.api ?? defaults?.api;
 	if (!api) {
 		throw new Error(
@@ -209,6 +226,44 @@ function modelFromJson(
 	if (definition.maxTokens !== undefined && definition.maxTokens <= 0) {
 		throw new Error(`Provider ${providerId}, model ${definition.id}: invalid maxTokens`);
 	}
+	const cost = definition.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	const input = (definition.input ?? ["text"]) as ("text" | "image")[];
+	if (type === "classifier") {
+		const contextWindow =
+			definition.contextWindow ??
+			(defaults && isModelType(defaults, "classifier") ? defaults.contextWindow : undefined);
+		if (!contextWindow) {
+			throw new Error(
+				`Provider ${providerId}, model ${definition.id}: "contextWindow" is required for classifier models.`,
+			);
+		}
+		return {
+			type: "classifier",
+			id: definition.id,
+			name: definition.name ?? definition.id,
+			api: api as ClassifierApi,
+			provider: providerId,
+			baseUrl,
+			input,
+			cost,
+			contextWindow,
+			headers: undefined,
+		};
+	}
+	if (type === "image") {
+		return {
+			type: "image",
+			id: definition.id,
+			name: definition.name ?? definition.id,
+			api: api as ImageApi,
+			provider: providerId,
+			baseUrl,
+			input,
+			output: (definition.output ?? ["image"]) as ("text" | "image")[],
+			cost,
+			headers: undefined,
+		};
+	}
 	return {
 		id: definition.id,
 		name: definition.name ?? definition.id,
@@ -217,9 +272,9 @@ function modelFromJson(
 		baseUrl,
 		reasoning: definition.reasoning ?? false,
 		thinkingLevelMap: definition.thinkingLevelMap,
-		input: (definition.input ?? ["text"]) as ("text" | "image")[],
+		input,
 		inputLimits: definition.inputLimits,
-		cost: definition.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		cost,
 		promptCache: definition.promptCache,
 		contextWindow: definition.contextWindow ?? 128000,
 		maxTokens: definition.maxTokens ?? 16384,
@@ -227,16 +282,6 @@ function modelFromJson(
 		headers: undefined,
 		compat: mergeCompat(providerConfig.compat, definition.compat),
 	};
-}
-
-function findModelDefaults(models: readonly AnyModel[], modelId: string, api?: Api): Model<Api> | undefined {
-	const chatModels = models.filter((model) => isModelType(model, "chat"));
-	return (
-		chatModels.find((model) => model.id === modelId) ??
-		(api ? chatModels.find((model) => model.api === api) : undefined) ??
-		chatModels.find((model) => model.api === "openai-completions") ??
-		chatModels[0]
-	);
 }
 
 function findExtensionModelDefaults(
@@ -310,9 +355,11 @@ function applyModelsJson(
 			: { ...model, baseUrl };
 	});
 	for (const definition of config.models ?? []) {
-		const existingIndex = models.findIndex((model) => isModelType(model, "chat") && model.id === definition.id);
-		const defaults = findModelDefaults(models, definition.id, definition.api ?? config.api);
-		const model = modelFromJson(providerId, definition, config, defaults);
+		const modelType = definition.type ?? "chat";
+		const existingIndex = models.findIndex(
+			(model) => (model.type ?? "chat") === modelType && model.id === definition.id,
+		);
+		const model = modelFromJson(providerId, definition, config, models);
 		if (existingIndex >= 0) models[existingIndex] = model;
 		else models.push(model);
 	}
@@ -491,17 +538,16 @@ function rawModelHeaders(
 	config: ModelsJsonProvider | undefined,
 	extension: ProviderConfigInput | undefined,
 ): Record<string, string> | undefined {
-	// models.json definitions and overrides are chat-only. Extension definitions
-	// are matched by operation and id so colliding models cannot share headers.
-	const chatDefinition = isModelType(model, "chat")
-		? config?.models?.find((entry) => entry.id === model.id)
-		: undefined;
+	// models.json modelOverrides remain chat-only. Custom definitions match by type and id.
+	const jsonDefinition = config?.models?.find(
+		(entry) => entry.id === model.id && (entry.type ?? "chat") === (model.type ?? "chat"),
+	);
 	const extensionModel = extension?.models?.find(
 		(entry) => (entry.type ?? "chat") === (model.type ?? "chat") && entry.id === model.id,
 	);
 	const headers = {
 		...(isModelType(model, "chat") ? config?.modelOverrides?.[model.id]?.headers : undefined),
-		...chatDefinition?.headers,
+		...jsonDefinition?.headers,
 		...extensionModel?.headers,
 	};
 	return Object.keys(headers).length > 0 ? headers : undefined;
