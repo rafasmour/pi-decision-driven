@@ -25,7 +25,10 @@ import type {
 	AgentTool,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
+	DecisionClassify,
+	DecisionConfig,
 	FinishTurn,
+	InterpretDecision,
 	PrepareNextTurnContext,
 	PrepareRequest,
 	QueueMode,
@@ -138,6 +141,12 @@ export interface AgentOptions {
 	transport?: Transport;
 	maxRetryDelayMs?: number;
 	toolExecution?: ToolExecutionMode;
+	/** Enables decision-driven mode. See {@link AgentLoopConfig.decisionDriven}. */
+	decisionDriven?: boolean;
+	/** Answers `ask_decision` questions and enables decision-driven mode. */
+	classify?: DecisionClassify;
+	decisionConfig?: DecisionConfig;
+	interpretDecision?: InterpretDecision;
 }
 
 class PendingMessageQueue {
@@ -226,6 +235,11 @@ export class Agent {
 	public maxRetryDelayMs?: number;
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
+	/** Enables decision-driven mode. See {@link AgentLoopConfig.decisionDriven}. */
+	public decisionDriven?: boolean;
+	public classify?: DecisionClassify;
+	public decisionConfig?: DecisionConfig;
+	public interpretDecision?: InterpretDecision;
 
 	constructor(options: AgentOptions) {
 		// Older compiled consumers may omit options or streamFn even though the current API requires them.
@@ -251,6 +265,10 @@ export class Agent {
 		this.transport = runtimeOptions.transport ?? "auto";
 		this.maxRetryDelayMs = runtimeOptions.maxRetryDelayMs;
 		this.toolExecution = runtimeOptions.toolExecution ?? "parallel";
+		this.decisionDriven = runtimeOptions.decisionDriven;
+		this.classify = runtimeOptions.classify;
+		this.decisionConfig = runtimeOptions.decisionConfig;
+		this.interpretDecision = runtimeOptions.interpretDecision;
 	}
 
 	/**
@@ -481,6 +499,10 @@ export class Agent {
 			afterToolCall: this.afterToolCall,
 			finishTurn: this.finishTurn,
 			prepareRequest: this.prepareRequest,
+			decisionDriven: this.decisionDriven,
+			classify: this.classify,
+			decisionConfig: this.decisionConfig,
+			interpretDecision: this.interpretDecision,
 			prepareNextTurn:
 				this.prepareNextTurnWithContext || this.prepareNextTurn
 					? async (context) => {

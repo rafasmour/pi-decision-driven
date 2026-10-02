@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added decision-driven mode to the agent loop. With `classify` or `decisionDriven: true` on `AgentLoopConfig` (and `AgentOptions`), an assistant turn whose only tool call is the reserved `ask_decision` tool is answered by the `classify` hook instead of executing a tool. The loop emits `decision_start` and `decision_end` events with `{ phase, questions, answers? }`, returns the answers as the tool result, and continues. Without a classifier the decision is emitted in the `await_human` phase and the run ends.
+- Added `DecisionPhase`, `DecisionConfig` (`maxQualityRetries`, `confidenceThreshold`), `DecisionClassify`, `InterpretDecision`, and `DECISION_TOOL_NAME`, plus `decisionPhase` on the turn context passed to `finishTurn`.
+- Added `createMessageCheckpoint` and `restoreMessagesToCheckpoint` for rolling the transcript back to a message index before a draft phase.
+
 ## [1.0.0] - 2026-10-01
 
 ### Breaking Changes
