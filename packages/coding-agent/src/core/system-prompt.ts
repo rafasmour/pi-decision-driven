@@ -29,6 +29,8 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
 	skills?: Skill[];
+	/** Decision-driven mode: text ```decisions``` blocks and S4 skill index behavior. */
+	decisionDriven?: boolean;
 }
 
 export type NormalizedBuildSystemPromptOptions = BuildSystemPromptOptions & {
@@ -66,6 +68,7 @@ export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOption
 		cwd: input.cwd,
 		contextFiles: (input.contextFiles ?? []).map((file) => ({ ...file })),
 		skills: (input.skills ?? []).map((skill) => ({ ...skill })),
+		decisionDriven: input.decisionDriven ?? false,
 	};
 }
 
@@ -131,6 +134,7 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		cwd,
 		contextFiles,
 		skills,
+		decisionDriven,
 	} = options;
 
 	for (const name of Object.keys(customSections)) {
@@ -143,8 +147,9 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 	if (customPrompt) {
 		promptSections.preamble = customPrompt;
 	} else {
-		promptSections.preamble =
-			"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
+		promptSections.preamble = decisionDriven
+			? "You are the chat model in pi's decision-driven harness. Your job is to ask scrapeable questions; the classifier (JEV) and human gates decide outcomes — you do not pick options or commit to a plan yourself. Until the harness returns classified answers, output questions only (```decisions``` block, see decisions_format): no tool calls, no file edits, no implementation. After authorization: (1) ask — ```decisions``` when intent is unclear; (2) tool-call — use tools only when the loop selected a tool intent; (3) write code — edit or write files only when that intent was chosen."
+			: "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
 		const visibleTools = selectedTools.filter((name) => !!toolSnippets[name]);
 		const tools =
 			visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets[name]}`).join("\n") : "(none)";
@@ -163,7 +168,27 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 	if (appendSystemPrompt) promptSections.addendum = appendSystemPrompt;
 	if (contextFiles.length > 0) promptSections.project_context = renderProjectContext(contextFiles);
 	const skillFileReadTool = (["read", "bash"] as const).find((tool) => selectedTools.includes(tool));
-	if (skillFileReadTool && skills.length > 0) {
+	if (decisionDriven) {
+		promptSections.decisions_format = [
+			"Emit exactly one ```decisions block when you need answers before acting:",
+			"```decisions",
+			"{",
+			'  "goal": "optional one-line goal",',
+			'  "state": { "optional": "context for the classifier" },',
+			'  "questions": [',
+			'    { "id": "unique_id", "prompt": "Yes or no question?" },',
+			'    { "id": "pick", "prompt": "Choose approach", "options": [{ "value": "a", "label": "Short intent label" }] }',
+			"  ]",
+			"}",
+			"```",
+			"Omit options for yes/no. Provide options (value + label) for multiple choice. Labels describe intents, not full tool arguments.",
+		].join("\n");
+		const visibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
+		if (visibleSkills.length > 0) {
+			promptSections.skills =
+				"Skills are not listed inline. Include a yes/no question (id skill_help) in a decisions block when skill guidance may help; the harness classifies and injects the best skill. Users can still invoke /skill:name directly.";
+		}
+	} else if (skillFileReadTool && skills.length > 0) {
 		const skillsPrompt = formatSkillsForPrompt(skills, skillFileReadTool).trim();
 		if (skillsPrompt) promptSections.skills = skillsPrompt;
 	}

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Wired decision-driven mode when a session classifier is configured (or `decisionDriven` is not disabled): parses ```decisions fenced JSON blocks from assistant text (no tool calls in that turn), classifies via `questionsToClassifierContext`, emits `decision-request` / `decision-result` U1 cards, and hydrates skills on classified skill-help answers (S4: skill index omitted from the default prompt; use a decisions block or `/skill:name`). Tool-based `ask_decision` is not used in coding-agent (Wave 2b may add prepareRequest gating).
 - Added `/classifier`, a selector for classifier (decision) models such as Jev. It lists only classifier models with working credentials, sets the session decision model (`AgentSession.classifierModel`), and saves it as the default with Ctrl+S. Added the `defaultClassifierProvider` and `defaultClassifierModel` settings. `/model` stays chat-only. See [Select a classifier model](docs/models.md#select-a-classifier-model).
 - Added decision request and result cards. Interactive mode renders custom messages of type `decision-request` and `decision-result` with `DecisionRequestCard` and `DecisionResultCard`: result cards show the chosen answer with a compact probability bar and expand to full per-option scores. The `decision-cards.ts` example extension adds `/decision-demo` to show them from fixtures.
 
