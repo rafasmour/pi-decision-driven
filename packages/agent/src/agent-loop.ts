@@ -115,16 +115,17 @@ export async function runAgentLoop(
 	signal: AbortSignal | undefined,
 	streamFn: StreamFn,
 ): Promise<AgentMessage[]> {
-	const initialMessages = declareToolChanges(context, prompts);
-	const newMessages: AgentMessage[] = [...initialMessages];
+	// Append prompts without declaring tools yet. prepareRequest (inside runLoop) may restrict
+	// the executable set; declareToolChanges runs afterward so the model never sees blocked tools.
+	const newMessages: AgentMessage[] = [...prompts];
 	const currentContext: AgentContext = {
 		...context,
-		messages: [...context.messages, ...initialMessages],
+		messages: [...context.messages, ...prompts],
 	};
 
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
-	for (const message of initialMessages) {
+	for (const message of prompts) {
 		await emit({ type: "message_start", message });
 		await emit({ type: "message_end", message });
 	}
@@ -215,8 +216,11 @@ async function runLoop(
 				await emit({ type: "turn_start" });
 			}
 
-			// Process prepared and queued messages before the next assistant response.
-			for (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
+			// Append prepared/queued messages first so prepareRequest sees them, then let
+			// prepareRequest adjust the executable tool set, then declare that set to the model.
+			// Declaring before prepareRequest caused decision-driven pre-auth to advertise write/edit
+			// while execution rejected them ("Tool write not found").
+			for (const message of [...preparedMessages, ...pendingMessages]) {
 				await emit({ type: "message_start", message });
 				await emit({ type: "message_end", message });
 				currentContext.messages.push(message);
@@ -244,6 +248,13 @@ async function runLoop(
 								? undefined
 								: requestUpdate.thinkingLevel,
 				};
+			}
+
+			for (const message of declareToolChanges(currentContext, [])) {
+				await emit({ type: "message_start", message });
+				await emit({ type: "message_end", message });
+				currentContext.messages.push(message);
+				newMessages.push(message);
 			}
 
 			// Stream assistant response
@@ -346,11 +357,12 @@ async function runLoop(
  * Declare tool loadout changes to the model.
  *
  * `context.tools` is what the runtime can execute; the transcript's system messages declare
- * what the model may call. Before each request the difference becomes `toolsAdded` and
- * `toolsRemoved` on a system message. When a pending system message exists, its tool fields
- * are treated as intent and replaced with the delta between the committed transcript and
- * the executable set, so replay always yields exactly `context.tools`. Otherwise a new
- * system message is inserted before the first non-system pending message.
+ * what the model may call. Call this after `prepareRequest` so request-time tool restrictions
+ * (for example decision-driven pre-auth) are reflected in `toolsAdded` / `toolsRemoved`.
+ * When a pending system message exists, its tool fields are treated as intent and replaced
+ * with the delta between the committed transcript and the executable set, so replay always
+ * yields exactly `context.tools`. Otherwise a new system message is inserted before the first
+ * non-system pending message.
  */
 function declareToolChanges(context: AgentContext, pendingMessages: AgentMessage[]): AgentMessage[] {
 	let systemIndex = -1;
