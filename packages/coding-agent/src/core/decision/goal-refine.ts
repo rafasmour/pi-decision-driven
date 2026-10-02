@@ -23,7 +23,7 @@ export function goalCardFromUserMessage(userMessage: string): GoalCard {
 	const goal = capStateField(firstLine || userMessage.trim(), 240);
 	return {
 		goal,
-		criteria: "Address the user request accurately and completely.",
+		criteria: "Progress on the user request without inventing requirements.",
 		recent: [],
 		frozen: true,
 	};

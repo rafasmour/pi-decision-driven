@@ -15,11 +15,17 @@ export interface QualityGateResult {
 	answers: Record<string, ClassifierAnswer>;
 }
 
+export interface ParseQualityGateOptions {
+	/** When false, ignore on_goal demotion (empty / missing goal). Default true. */
+	hasGoal?: boolean;
+}
+
 export function qualityGateClassifierContext(goalCard: GoalCard, draft: string): ClassifierContext {
 	const state: JsonObject = {
 		goal_card: goalCardClassifierState(goalCard),
 		draft: capDraftText(draft, 4_000),
 	};
+	const hasGoal = goalCard.goal.trim().length > 0;
 	return {
 		state,
 		questions: {
@@ -28,25 +34,33 @@ export function qualityGateClassifierContext(goalCard: GoalCard, draft: string):
 				instructions:
 					"Given goal_card and draft, how should the harness handle this assistant draft before showing it to the user?",
 				criteria: {
-					prompt_user: "Draft is OK to show; no harness action",
+					prompt_user: "Show this draft to the user; harness done (do not ask the human anything)",
 					incomplete_continue: "Draft is partial; model should continue working",
 					poor_quality_try_again: "Draft misses the goal; retry generation",
-					poor_quality_prompt_user: "Draft is poor after retries; ask the human",
+					poor_quality_prompt_user: "Draft is poor after retries; ask the human whether to keep it",
 				},
 			},
-			on_goal: {
-				type: "bool",
-				instructions: "Does draft satisfy goal_card.goal and goal_card.criteria?",
-				criteria: {
-					true: "Draft meets the goal",
-					false: "Draft misses the goal",
-				},
-			},
+			...(hasGoal
+				? {
+						on_goal: {
+							type: "bool" as const,
+							instructions: "Does draft satisfy goal_card.goal and goal_card.criteria?",
+							criteria: {
+								true: "Draft meets the goal",
+								false: "Draft misses the goal",
+							},
+						},
+					}
+				: {}),
 		},
 	};
 }
 
-export function parseQualityGateResult(result: Pick<ClassifierResult, "answers" | "stopReason">): QualityGateResult {
+export function parseQualityGateResult(
+	result: Pick<ClassifierResult, "answers" | "stopReason">,
+	options?: ParseQualityGateOptions,
+): QualityGateResult {
+	const hasGoal = options?.hasGoal !== false;
 	const fallback: QualityGateResult = {
 		route: "prompt_user",
 		onGoal: 1,
@@ -71,7 +85,8 @@ export function parseQualityGateResult(result: Pick<ClassifierResult, "answers" 
 	const onGoalAnswer = result.answers.on_goal;
 	const onGoal = onGoalAnswer?.type === "bool" ? onGoalAnswer.probability : 1;
 
-	if (onGoalAnswer?.type === "bool" && onGoalAnswer.probability < 0.5) {
+	// Only demote deliver→retry when a real goal was classified.
+	if (hasGoal && onGoalAnswer?.type === "bool" && onGoalAnswer.probability < 0.5) {
 		route = route === "prompt_user" ? "poor_quality_try_again" : route;
 	}
 
@@ -84,6 +99,10 @@ export function applyQualityRouteWithRetries(
 	maxQualityRetries: number,
 ): QualityRoute {
 	if (parsed.route !== "poor_quality_try_again" && parsed.route !== "incomplete_continue") return parsed.route;
+	// Zero retry budget means show the draft — not escalate to a human confirm loop.
+	if (parsed.route === "poor_quality_try_again" && maxQualityRetries <= 0) {
+		return "prompt_user";
+	}
 	if (parsed.route === "poor_quality_try_again" && qualityRetriesUsed < maxQualityRetries) {
 		return "poor_quality_try_again";
 	}

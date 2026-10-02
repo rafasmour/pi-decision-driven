@@ -94,6 +94,7 @@ describe("decision-driven system prompt (S4)", () => {
 
 		expect(prompt).toContain("decision-driven harness");
 		expect(prompt).toContain("ask_decision");
+		expect(prompt).toContain("first tool call");
 		expect(prompt).toContain("<ask_decision>");
 		expect(prompt).not.toContain("<available_skills>");
 		expect(prompt).toContain("skill_help");

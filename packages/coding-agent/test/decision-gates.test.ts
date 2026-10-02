@@ -12,9 +12,17 @@ import {
 } from "../src/core/decision/goal-card.ts";
 import { mergeRefinedGoalCard } from "../src/core/decision/goal-refine.ts";
 import { parseOffPlanResult } from "../src/core/decision/off-plan.ts";
-import { applyQualityRouteWithRetries, parseQualityGateResult } from "../src/core/decision/quality-gate.ts";
+import {
+	applyQualityRouteWithRetries,
+	parseQualityGateResult,
+	qualityGateClassifierContext,
+} from "../src/core/decision/quality-gate.ts";
 import { isStaticallyDeniedBash } from "../src/core/decision/security-gate.ts";
-import { detectToolIntentFromAnswers, toolNamesForIntent } from "../src/core/decision/tool-intent.ts";
+import {
+	detectToolIntentFromAnswers,
+	resolveToolIntentValue,
+	toolNamesForIntent,
+} from "../src/core/decision/tool-intent.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 
 function assistant(text: string) {
@@ -72,26 +80,55 @@ describe("GoalCard GC2", () => {
 			stopReason: "stop",
 		});
 		expect(card.goal).toBe("Build the login flow");
+		expect(card.criteria).toBe("Progress on the user request without inventing requirements.");
 		expect(card.frozen).toBe(true);
 	});
 });
 
 describe("R1 quality gate", () => {
-	it("treats on_goal false as try_again", () => {
-		const parsed = parseQualityGateResult({
-			stopReason: "stop",
-			answers: {
-				routing: {
-					type: "choice",
-					choice: "prompt_user",
-					confidence: 0.8,
-					probabilities: { prompt_user: 0.8 },
+	it("treats on_goal false as try_again when a goal exists", () => {
+		const parsed = parseQualityGateResult(
+			{
+				stopReason: "stop",
+				answers: {
+					routing: {
+						type: "choice",
+						choice: "prompt_user",
+						confidence: 0.8,
+						probabilities: { prompt_user: 0.8 },
+					},
+					on_goal: { type: "bool", probability: 0.2 },
 				},
-				on_goal: { type: "bool", probability: 0.2 },
 			},
-		});
+			{ hasGoal: true },
+		);
 		expect(parsed.route).toBe("poor_quality_try_again");
 		expect(parsed.onGoal).toBeLessThan(0.5);
+	});
+
+	it("does not demote deliver when goal is empty", () => {
+		const parsed = parseQualityGateResult(
+			{
+				stopReason: "stop",
+				answers: {
+					routing: {
+						type: "choice",
+						choice: "prompt_user",
+						confidence: 0.8,
+						probabilities: { prompt_user: 0.8 },
+					},
+					on_goal: { type: "bool", probability: 0.1 },
+				},
+			},
+			{ hasGoal: false },
+		);
+		expect(parsed.route).toBe("prompt_user");
+	});
+
+	it("omits on_goal from classifier context when goal is blank", () => {
+		const context = qualityGateClassifierContext({ goal: "  ", recent: [] }, "Draft text");
+		expect(context.questions.on_goal).toBeUndefined();
+		expect(context.questions.routing).toBeDefined();
 	});
 
 	it("caps retries then prompts user", () => {
@@ -110,6 +147,26 @@ describe("R1 quality gate", () => {
 		expect(applyQualityRouteWithRetries(parsed, 0, 2)).toBe("poor_quality_try_again");
 		expect(applyQualityRouteWithRetries(parsed, 2, 2)).toBe("poor_quality_prompt_user");
 	});
+
+	it("shows draft when maxQualityRetries is zero instead of escalating", () => {
+		const parsed = parseQualityGateResult(
+			{
+				stopReason: "stop",
+				answers: {
+					routing: {
+						type: "choice",
+						choice: "prompt_user",
+						confidence: 0.8,
+						probabilities: { prompt_user: 0.8 },
+					},
+					on_goal: { type: "bool", probability: 0.2 },
+				},
+			},
+			{ hasGoal: true },
+		);
+		expect(parsed.route).toBe("poor_quality_try_again");
+		expect(applyQualityRouteWithRetries(parsed, 0, 0)).toBe("prompt_user");
+	});
 });
 
 describe("D1 tool_args restriction", () => {
@@ -123,6 +180,51 @@ describe("D1 tool_args restriction", () => {
 		expect(detectToolIntentFromAnswers(batch, answers)).toBe("read");
 		const restricted = toolNamesForIntent("read", ["read", "bash", "edit", "write", "ask_decision"]);
 		expect(restricted).toEqual(["read", "ask_decision"]);
+	});
+
+	it("ignores product choice answers that are not tool-family aliases", () => {
+		const batch = {
+			questions: [
+				{
+					id: "ship",
+					prompt: "Ship this approach?",
+					options: [
+						{ value: "yes", label: "Yes" },
+						{ value: "no", label: "No" },
+					],
+				},
+			],
+		};
+		const answers: Record<string, ClassifierAnswer> = {
+			ship: { type: "choice", choice: "yes", confidence: 0.9, probabilities: { yes: 0.9, no: 0.1 } },
+		};
+		expect(detectToolIntentFromAnswers(batch, answers)).toBeUndefined();
+		expect(resolveToolIntentValue("yes")).toBeUndefined();
+		expect(resolveToolIntentValue("refactor")).toBeUndefined();
+	});
+
+	it("detects write intent and keeps write in the restricted family", () => {
+		const batch = {
+			questions: [
+				{
+					id: "action",
+					prompt: "Next action?",
+					options: [
+						{ value: "write", label: "Write files" },
+						{ value: "respond", label: "Reply" },
+					],
+				},
+			],
+		};
+		const answers: Record<string, ClassifierAnswer> = {
+			action: { type: "choice", choice: "write", confidence: 0.95, probabilities: { write: 0.95 } },
+		};
+		expect(detectToolIntentFromAnswers(batch, answers)).toBe("write");
+		expect(toolNamesForIntent("write", ["read", "write", "edit", "ask_decision"])).toEqual(["write", "ask_decision"]);
+	});
+
+	it("lifts restriction when intent family matches no active Act tools", () => {
+		expect(toolNamesForIntent("bash", ["read", "write", "ask_decision"])).toBeUndefined();
 	});
 
 	it("filters agent context tools to the restricted family", () => {
