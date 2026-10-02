@@ -5,9 +5,11 @@
 
 import {
 	type AssistantMessage,
+	type ClassifierQuestion,
 	EventStream,
 	getCurrentTools,
 	getToolStateChanges,
+	type JsonObject,
 	normalizeContext,
 	type SystemMessage,
 	type ToolResultMessage,
@@ -16,17 +18,20 @@ import {
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
 import { getDefaultStreamFn } from "./stream-fn.ts";
-import type {
-	AgentContext,
-	AgentEvent,
-	AgentLoopConfig,
-	AgentMessage,
-	AgentTool,
-	AgentToolCall,
-	AgentToolCallOutcome,
-	AgentToolResult,
-	PrepareNextTurnContext,
-	StreamFn,
+import {
+	type AgentContext,
+	type AgentEvent,
+	type AgentLoopConfig,
+	type AgentMessage,
+	type AgentTool,
+	type AgentToolCall,
+	type AgentToolCallOutcome,
+	type AgentToolResult,
+	DECISION_TOOL_NAME,
+	type DecisionClassify,
+	type DecisionPhase,
+	type PrepareNextTurnContext,
+	type StreamFn,
 } from "./types.ts";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
@@ -260,20 +265,33 @@ async function runLoop(
 
 			const toolResults: ToolResultMessage[] = [];
 			hasMoreToolCalls = false;
+			let decisionPhase: DecisionPhase = "idle";
 			if (toolCalls.length > 0) {
 				// A "length" stop means the output was cut off by the token limit, so
 				// every tool call in the message may carry truncated arguments. Fail
 				// them all instead of executing potentially borked calls.
-				const executedToolBatch =
-					message.stopReason === "length"
-						? await failToolCallsFromTruncatedMessage(toolCalls, emit)
-						: await executeToolCalls(currentContext, message, config, signal, emit);
+				let executedToolBatch: ExecutedToolCallBatch;
+				if (message.stopReason === "length") {
+					executedToolBatch = await failToolCallsFromTruncatedMessage(toolCalls, emit);
+				} else if (isDecisionMode(config) && isDecisionOnlyTurn(toolCalls)) {
+					const decisionBatch = await runDecision(currentContext, message, toolCalls[0], config, signal, emit);
+					decisionPhase = decisionBatch.phase;
+					executedToolBatch = decisionBatch;
+				} else {
+					executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
+				}
 				toolResults.push(...executedToolBatch.messages);
 				hasMoreToolCalls = !executedToolBatch.terminate;
 
 				for (const result of toolResults) {
 					currentContext.messages.push(result);
 					newMessages.push(result);
+				}
+				for (const appended of executedToolBatch.appendedMessages ?? []) {
+					await emit({ type: "message_start", message: appended });
+					await emit({ type: "message_end", message: appended });
+					currentContext.messages.push(appended);
+					newMessages.push(appended);
 				}
 			}
 
@@ -282,6 +300,7 @@ async function runLoop(
 				toolResults,
 				context: currentContext,
 				newMessages,
+				...(isDecisionMode(config) ? { decisionPhase } : {}),
 			};
 			const decision = await config.finishTurn?.(lastCompletedTurn, signal);
 			await emit({ type: "turn_end", message, toolResults });
@@ -525,7 +544,160 @@ async function executeToolCalls(
 type ExecutedToolCallBatch = {
 	messages: ToolResultMessage[];
 	terminate: boolean;
+	/** Messages appended after the tool results, with normal lifecycle events. */
+	appendedMessages?: AgentMessage[];
 };
+
+/** Whether the loop should treat the reserved decision tool specially. */
+function isDecisionMode(config: AgentLoopConfig): boolean {
+	return config.decisionDriven === true || config.classify !== undefined;
+}
+
+/** A decision turn calls the reserved decision tool and nothing else. */
+function isDecisionOnlyTurn(toolCalls: AgentToolCall[]): boolean {
+	return toolCalls.length === 1 && toolCalls[0].name === DECISION_TOOL_NAME;
+}
+
+/**
+ * Message-index checkpoint (T1): the number of messages in the transcript right now.
+ * Take one before a draft phase, then pass it to {@link restoreMessagesToCheckpoint}
+ * to discard the draft, for example when the quality gate fails and the draft is retried.
+ */
+export function createMessageCheckpoint(messages: readonly AgentMessage[]): number {
+	return messages.length;
+}
+
+/**
+ * Truncate `messages` in place to the first `checkpointIndex` messages and return the removed ones.
+ * Throws a RangeError when the index is not an integer between 0 and `messages.length`.
+ */
+export function restoreMessagesToCheckpoint(messages: AgentMessage[], checkpointIndex: number): AgentMessage[] {
+	if (!Number.isInteger(checkpointIndex) || checkpointIndex < 0 || checkpointIndex > messages.length) {
+		throw new RangeError(`Invalid checkpoint index ${checkpointIndex} for ${messages.length} messages`);
+	}
+	return messages.splice(checkpointIndex);
+}
+
+function isQuestionRecord(value: unknown): value is Record<string, ClassifierQuestion> {
+	return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length > 0;
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type DecisionBatch = ExecutedToolCallBatch & { phase: DecisionPhase };
+
+/**
+ * Handle a turn whose only tool call is `ask_decision`. The call is never executed as a tool:
+ * its `questions` are answered by `config.classify` and the answers come back as the tool result.
+ * Without a classifier the decision is surfaced in the `await_human` phase and the run ends.
+ */
+async function runDecision(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	toolCall: AgentToolCall,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): Promise<DecisionBatch> {
+	await emit({
+		type: "tool_execution_start",
+		toolCallId: toolCall.id,
+		toolName: toolCall.name,
+		args: toolCall.arguments,
+	});
+
+	const rawQuestions: unknown = toolCall.arguments.questions;
+	const rawState: unknown = toolCall.arguments.state;
+	let finalized: FinalizedToolCallOutcome;
+	let phase: DecisionPhase = "idle";
+	let appendedMessages: AgentMessage[] | undefined;
+	let terminate = false;
+
+	if (!isQuestionRecord(rawQuestions) || (rawState !== undefined && !isJsonObject(rawState))) {
+		finalized = {
+			toolCall,
+			result: createErrorToolResult(
+				`Tool call "${DECISION_TOOL_NAME}" needs a non-empty "questions" object and, optionally, a "state" object.`,
+			),
+			isError: true,
+		};
+	} else if (!config.classify) {
+		phase = "await_human";
+		terminate = true;
+		await emit({ type: "decision_start", phase, questions: rawQuestions });
+		await emit({ type: "decision_end", phase, questions: rawQuestions });
+		finalized = {
+			toolCall,
+			result: {
+				content: [{ type: "text", text: "Decision requires human input; no classifier is configured." }],
+				details: { phase, questions: rawQuestions },
+				terminate: true,
+			},
+			isError: false,
+		};
+	} else {
+		phase = "classify";
+		await emit({ type: "decision_start", phase, questions: rawQuestions });
+		let classified: Awaited<ReturnType<DecisionClassify>>;
+		try {
+			classified = await config.classify({ state: rawState ?? {}, questions: rawQuestions }, signal);
+		} catch (error) {
+			classified = {
+				answers: {},
+				stopReason: "error",
+				errorMessage: error instanceof Error ? error.message : String(error),
+			};
+		}
+
+		if (classified.stopReason === "stop") {
+			await emit({ type: "decision_end", phase, questions: rawQuestions, answers: classified.answers });
+			finalized = {
+				toolCall,
+				result: {
+					content: [{ type: "text", text: JSON.stringify(classified.answers) }],
+					details: { phase, questions: rawQuestions, answers: classified.answers },
+				},
+				isError: false,
+			};
+			try {
+				appendedMessages =
+					(await config.interpretDecision?.(
+						{
+							message: assistantMessage,
+							questions: rawQuestions,
+							answers: classified.answers,
+							context: currentContext,
+						},
+						signal,
+					)) ?? undefined;
+			} catch (error) {
+				finalized = {
+					toolCall,
+					result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+					isError: true,
+				};
+			}
+		} else {
+			await emit({ type: "decision_end", phase, questions: rawQuestions });
+			finalized = {
+				toolCall,
+				result: createErrorToolResult(
+					classified.errorMessage ?? `Decision classification ended with stop reason "${classified.stopReason}".`,
+				),
+				isError: true,
+			};
+		}
+		// The decision is settled either way; the model sees the result and the loop moves on.
+		if (phase === "classify") phase = "idle";
+	}
+
+	await emitToolExecutionEnd(finalized, emit);
+	const toolResultMessage = createToolResultMessage(finalized);
+	await emitToolResultMessage(toolResultMessage, emit);
+	return { messages: [toolResultMessage], terminate, appendedMessages, phase };
+}
 
 async function executeToolCallsSequential(
 	currentContext: AgentContext,

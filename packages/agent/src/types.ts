@@ -3,6 +3,10 @@ import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
+	ClassifierAnswer,
+	ClassifierContext,
+	ClassifierQuestion,
+	ClassifierResult,
 	ImageContent,
 	JsonValue,
 	Message,
@@ -141,6 +145,8 @@ export interface AgentTurnContext {
 	context: AgentContext;
 	/** Messages that this loop invocation will return if it exits at this point. Prompt runs include the initial prompt messages; continuation runs do not include pre-existing context messages. */
 	newMessages: AgentMessage[];
+	/** Decision phase the turn ended in. `idle` unless the turn handled a decision. */
+	decisionPhase?: DecisionPhase;
 }
 
 /** Decision returned by {@link FinishTurn}. Returning undefined preserves normal scheduling. */
@@ -190,8 +196,95 @@ export type PrepareRequest = (
 
 export interface PrepareNextTurnContext extends AgentTurnContext {}
 
+/** Reserved tool name the model calls to request a classified decision in decision-driven mode. */
+export const DECISION_TOOL_NAME = "ask_decision";
+
+/**
+ * Phase of the decision loop.
+ *
+ * - `idle`: no decision in progress.
+ * - `question`: the model is posing questions through the reserved decision tool.
+ * - `classify`: the questions are being answered by the `classify` hook.
+ * - `tool_args`: tool arguments are being derived from the answers.
+ * - `draft`: the model is drafting output that may be rolled back to a checkpoint.
+ * - `gate`: a drafted output is being checked against the quality gate.
+ * - `await_human`: the loop cannot answer on its own and is waiting for a person.
+ */
+export type DecisionPhase = "idle" | "question" | "classify" | "tool_args" | "draft" | "gate" | "await_human";
+
+/** Questions and answers exchanged in one decision. Always JSON-serializable. */
+export interface DecisionPayload {
+	phase: DecisionPhase;
+	questions: Record<string, ClassifierQuestion>;
+	answers?: Record<string, ClassifierAnswer>;
+}
+
+/**
+ * Answers the questions of one decision. `Models.classify` results satisfy this shape once
+ * wrapped with a model, so callers can bind a classifier model and pass the resulting function.
+ * Must not throw for model failures; encode them as `stopReason: "error"` with `errorMessage`.
+ */
+export type DecisionClassify = (
+	context: ClassifierContext,
+	signal?: AbortSignal,
+) => Promise<Pick<ClassifierResult, "answers" | "stopReason" | "errorMessage">>;
+
+/** Tunables for the decision loop. */
+export interface DecisionConfig {
+	/**
+	 * Maximum number of draft retries after a failed quality gate. Defaults to 0 when omitted.
+	 * Carried on the config for later phases; the loop does not enforce it yet.
+	 */
+	maxQualityRetries?: number;
+	/**
+	 * Minimum classifier confidence for an answer to be accepted without human review.
+	 * Carried on the config for later phases; the loop does not enforce it yet.
+	 */
+	confidenceThreshold?: number;
+}
+
+/** Context passed to {@link InterpretDecision}. */
+export interface DecisionResultContext {
+	/** The assistant message that requested the decision. */
+	message: AssistantMessage;
+	/** Questions asked by the model. */
+	questions: Record<string, ClassifierQuestion>;
+	/** Answers produced by the `classify` hook. */
+	answers: Record<string, ClassifierAnswer>;
+	/** Current agent context. The decision tool result has not been appended yet. */
+	context: AgentContext;
+}
+
+/**
+ * Turns classified answers into extra messages appended after the decision tool result.
+ * Returning undefined appends nothing; the tool result alone carries the answers to the model.
+ */
+export type InterpretDecision = (
+	decision: DecisionResultContext,
+	signal?: AbortSignal,
+) => AgentMessage[] | undefined | Promise<AgentMessage[] | undefined>;
+
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
+
+	/**
+	 * Enables decision-driven mode. Also implied by providing `classify`.
+	 *
+	 * In this mode an assistant message whose only tool call is `ask_decision` is not executed as a
+	 * normal tool. The loop emits `decision_start`, answers the call's `questions` with `classify`,
+	 * emits `decision_end`, and returns the answers to the model as the tool result. Without a
+	 * `classify` hook the loop emits the decision in the `await_human` phase and ends the run.
+	 */
+	decisionDriven?: boolean;
+
+	/** Answers the questions of a decision. Providing it enables decision-driven mode. */
+	classify?: DecisionClassify;
+
+	/** Tunables for the decision loop. */
+	decisionConfig?: DecisionConfig;
+
+	/** Optional hook that appends messages interpreting the answers of a decision. */
+	interpretDecision?: InterpretDecision;
 
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
@@ -526,4 +619,7 @@ export type AgentEvent =
 	// Tool execution lifecycle
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
-	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
+	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean }
+	// Decision lifecycle - emitted only in decision-driven mode
+	| ({ type: "decision_start" } & DecisionPayload)
+	| ({ type: "decision_end" } & DecisionPayload);
