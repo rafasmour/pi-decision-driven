@@ -114,8 +114,6 @@ describe("classify mapping", () => {
 {"questions":[{"id":"go","prompt":"Proceed?"}]}
 \`\`\``)!;
 		const context = toClassifierContext(batch);
-		expect(context.questions.go).toEqual(
-			expect.objectContaining({ type: "bool", instructions: "Proceed?" }),
-		);
+		expect(context.questions.go).toEqual(expect.objectContaining({ type: "bool", instructions: "Proceed?" }));
 	});
 });
