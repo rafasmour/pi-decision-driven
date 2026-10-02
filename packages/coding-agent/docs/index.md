@@ -4,6 +4,10 @@ Pi is an extensible AI agent that works from your terminal. Give it a goal and a
 
 Use Pi for software development, research notes, writing projects, data files, or hobby work. You can use Pi as is, prompt it to adapt itself to your workflow, or build other applications powered by Pi using the SDK.
 
+## Decision-Driven (this fork)
+
+This documentation tree is part of [Decision-Driven](../../../docs/decision-driven.md), a Pi fork that connects classifier models (Jev) to the agent loop. Wave 1 adds `/classifier`, the `ask_decision` decision loop in the agent runtime, questionnaire→classifier helpers, and interactive decision cards. Start with the [architecture overview](../../../docs/decision-driven.md), then [Select a classifier model](models.md#select-a-classifier-model).
+
 ## Start using Pi
 
 New to Pi? Follow the [Quickstart](quickstart.md) to install Pi, connect a model, and complete your first task.

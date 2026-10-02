@@ -10,18 +10,37 @@
 
 > New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-# Pi Agent Harness
+# Decision-Driven
 
-This is the home of the Pi agent harness project including our self extensible coding agent.
+*a Pi fork with a decision-model harness*
+
+This repository ([`rafasmour/pi-decision-driven`](https://github.com/rafasmour/pi-decision-driven)) extends [Pi](https://github.com/earendil-works/pi): the same minimal terminal agent, with classifiers wired into the agent loop so structured decisions drive routing, skills, and UI—not just free-form chat.
+
+npm packages still publish as **`@earendil-works/pi-*`** for compatibility with upstream Pi installs and docs.
+
+## Wave 1 (on `main`)
+
+| Capability | Summary |
+|---|---|
+| [`/classifier`](packages/coding-agent/docs/models.md#select-a-classifier-model) | Session classifier selection (Jev and others); chat models stay on `/model`. |
+| `ask_decision` loop | Decision-driven mode in `@earendil-works/pi-agent-core`: the model asks questions, the `classify` hook answers, the loop continues with tool results and `decision_start` / `decision_end` events. |
+| Questionnaire mapping | `questionsToClassifierContext()` in `@earendil-works/pi-ai` maps questionnaire batches to classifier questions. |
+| Decision cards (U1) | Interactive cards for `decision-request` / `decision-result` messages; see [`decision-cards.ts`](packages/coding-agent/examples/extensions/decision-cards.ts) (`/decision-demo`). |
+
+Architecture overview: [docs/decision-driven.md](docs/decision-driven.md).
+
+## Pi agent harness
+
+This monorepo is also the home of the Pi agent harness, including the self-extensible coding agent.
 
 * **[@earendil-works/pi-coding-agent](packages/coding-agent)**: Interactive coding agent CLI
 * **[@earendil-works/pi-agent-core](packages/agent)**: Agent runtime with tool calling and state management
 * **[@earendil-works/pi-ai](packages/ai)**: Unified multi-provider LLM API (OpenAI, Anthropic, Google, …)
 
-To learn more about Pi:
+To learn more about upstream Pi:
 
 * [Visit pi.dev](https://pi.dev), the project website with demos
-* [Read the documentation](https://pi.dev/docs/latest), but you can also ask the agent to explain itself
+* [Read the documentation](https://pi.dev/docs/latest), or the [coding-agent docs](packages/coding-agent/docs/index.md) in this repo
 
 ## All Packages
 

@@ -8,9 +8,11 @@
   <a href="https://www.npmjs.com/package/@earendil-works/pi-coding-agent"><img alt="npm" src="https://img.shields.io/npm/v/@earendil-works/pi-coding-agent?style=flat-square&logo=npm&logoColor=white" /></a>
 </p>
 
-> New issues and PRs from new contributors are closed automatically. Maintainers review closed submissions daily. See [CONTRIBUTING.md](https://github.com/earendil-works/pi/blob/main/CONTRIBUTING.md).
+> New issues and PRs from new contributors are closed automatically. Maintainers review closed submissions daily. See [CONTRIBUTING.md](https://github.com/rafasmour/pi-decision-driven/blob/main/CONTRIBUTING.md).
 
-# Pi
+# Pi coding agent (Decision-Driven fork)
+
+This tree ships as **`@earendil-works/pi-coding-agent`** (unchanged npm name). In [rafasmour/pi-decision-driven](https://github.com/rafasmour/pi-decision-driven) it is part of **Decision-Driven**, a Pi fork that adds classifier-driven decisions in the agent loop. See [Decision-Driven architecture](../../docs/decision-driven.md) for the harness overview; upstream Pi lives at [earendil-works/pi](https://github.com/earendil-works/pi).
 
 Pi is a minimal, extensible AI agent for the terminal. Adapt Pi to your workflow, not the other way around.
 
@@ -48,8 +50,8 @@ See the [documentation](docs/index.md) for full setup and usage instructions.
 Clone the repository, install its dependencies, and run Pi from source:
 
 ```bash
-git clone https://github.com/earendil-works/pi
-cd pi
+git clone https://github.com/rafasmour/pi-decision-driven
+cd pi-decision-driven
 npm install --ignore-scripts
 ./pi-test.sh
 ```
@@ -63,7 +65,7 @@ npm run check
 ./test.sh
 ```
 
-Read [CONTRIBUTING.md](https://github.com/earendil-works/pi/blob/main/CONTRIBUTING.md) before opening an issue or pull request. It defines the contribution gate, issue quality bar, and required checks. Read [AGENTS.md](https://github.com/earendil-works/pi/blob/main/AGENTS.md) for repository-specific implementation, testing, dependency, and release rules.
+Read [CONTRIBUTING.md](../../CONTRIBUTING.md) before opening an issue or pull request. Read [AGENTS.md](../../AGENTS.md) for repository-specific implementation, testing, dependency, and release rules.
 
 ## License
 
