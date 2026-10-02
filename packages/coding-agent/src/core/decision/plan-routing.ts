@@ -138,10 +138,9 @@ export function planModeSystemSection(decisionDriven: boolean): string {
 	];
 	if (decisionDriven) {
 		lines.push(
-			"Ask clarifying questions only via a single ```decisions JSON block per turn (see decisions_format).",
-			`When enough context is gathered, include a yes/no question with id "${READY_TO_DRAFT_PLAN_ID}" asking whether to draft the plan.`,
+			"Ask clarifying questions with the ask_decision tool (yes/no or multiple choice).",
+			`When enough context is gathered, include a yes/no question asking whether to draft the plan (prefer id "${READY_TO_DRAFT_PLAN_ID}" or wording like "Ready to draft the plan?").`,
 			"After the harness confirms ready_to_draft_plan, output numbered steps under a Plan: header.",
-			"Do not use the questionnaire tool for plan clarifications.",
 		);
 	} else {
 		lines.push(

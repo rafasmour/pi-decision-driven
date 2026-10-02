@@ -79,20 +79,22 @@ describe("decision follow-up messages", () => {
 });
 
 describe("decision-driven system prompt (S4)", () => {
-	it("documents the decisions block and omits the skill index", () => {
+	it("documents ask_decision and omits the skill index", () => {
 		const prompt = buildSystemPrompt({
 			decisionDriven: true,
-			selectedTools: ["read"],
-			toolSnippets: { read: "Read files" },
+			selectedTools: ["read", "ask_decision"],
+			toolSnippets: {
+				read: "Read files",
+				ask_decision: "Ask the classifier a structured decision",
+			},
 			skills: [testSkill],
 			contextFiles: [],
 			cwd: "/tmp",
 		});
 
 		expect(prompt).toContain("decision-driven harness");
-		expect(prompt).toContain("(1) ask");
-		expect(prompt).toContain("<decisions_format>");
-		expect(prompt).toContain(DECISION_BLOCK_FENCE);
+		expect(prompt).toContain("ask_decision");
+		expect(prompt).toContain("<ask_decision>");
 		expect(prompt).not.toContain("<available_skills>");
 		expect(prompt).toContain("skill_help");
 	});

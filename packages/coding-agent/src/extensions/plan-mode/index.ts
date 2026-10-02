@@ -1,5 +1,5 @@
 /**
- * Built-in decision-driven plan mode: read-only exploration, ```decisions``` clarifications,
+ * Built-in decision-driven plan mode: read-only exploration, ask_decision clarifications,
  * execute/refine handoff with GoalCard plan steps.
  */
 

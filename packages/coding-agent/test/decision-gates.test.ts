@@ -121,8 +121,8 @@ describe("D1 tool_args restriction", () => {
 			intent: { type: "choice", choice: "read", confidence: 0.9, probabilities: { read: 0.9 } },
 		};
 		expect(detectToolIntentFromAnswers(batch, answers)).toBe("read");
-		const restricted = toolNamesForIntent("read", ["read", "bash", "edit", "write"]);
-		expect(restricted).toEqual(["read"]);
+		const restricted = toolNamesForIntent("read", ["read", "bash", "edit", "write", "ask_decision"]);
+		expect(restricted).toEqual(["read", "ask_decision"]);
 	});
 
 	it("filters agent context tools to the restricted family", () => {

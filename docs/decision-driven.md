@@ -47,9 +47,9 @@ See `DecisionPhase` and `AgentLoopConfig` in `@earendil-works/pi-agent-core` for
 
 ## Plan vs build
 
-Wave 1 includes patterns, not a single built-in mode switch. The Jev router example uses classifier answers to choose a strong model for planning and first edits, then a cheaper model for follow-up work—plan and build as router state rather than separate products.
+Built-in plan mode (`/plan`, `--plan`, Ctrl+Alt+P) uses the same `ask_decision` channel with per-question JEV-vs-human routing. Build mode interrupts on security risk or low classifier confidence.
 
-Later waves wire `ask_decision` deeper into the coding-agent session, quality gates, and skill selection.
+Coding-agent wires `ask_decision` when a session classifier is configured: the tool is declared to the model, `classify` answers via the session classifier, and `interpretDecision` injects U1 cards plus skill hydration.
 
 ## Upstream
 

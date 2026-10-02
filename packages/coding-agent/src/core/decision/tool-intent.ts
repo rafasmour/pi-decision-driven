@@ -1,4 +1,5 @@
 import type { ClassifierAnswer } from "@earendil-works/pi-ai";
+import { DECISION_TOOL_NAME } from "@earendil-works/pi-agent-core";
 import type { AskDecisionArguments } from "./questionnaire.ts";
 
 /** Values that authorize a single tool family for the next LLM turn (D1 tool_args). */
@@ -53,12 +54,12 @@ export function detectToolIntentFromAnswers(
 	return undefined;
 }
 
-/** Restrict active tools to the intent family; `respond` clears restriction. */
+/** Restrict active tools to the intent family; `respond` clears restriction. Always keeps ask_decision. */
 export function toolNamesForIntent(intent: string, activeToolNames: readonly string[]): string[] | undefined {
 	if (intent === "respond") return undefined;
 	const family = resolveToolIntentValue(intent) ?? intent;
 	if (family === "respond") return undefined;
-	const allowed = new Set<string>([family]);
+	const allowed = new Set<string>([family, DECISION_TOOL_NAME]);
 	if (family === "bash") allowed.add("bash");
 	if (family === "read") {
 		allowed.add("read");

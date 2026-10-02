@@ -15,6 +15,10 @@ packages/ai/src/providers/.model-generation-*/
 # Environment
 .env
 
+# Local decision-driven test env must live outside the repo
+# (use scripts/setup-decision-driven-sandbox.sh → ~/.pi/decision-driven-sandbox)
+sandbox/
+
 # Editor files
 .vscode/
 .zed/
