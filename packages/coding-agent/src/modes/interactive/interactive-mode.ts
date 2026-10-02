@@ -95,6 +95,7 @@ import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.t
 import type { McpHttpServerConfig } from "../../core/mcp-servers.ts";
 import { createCompactionSummaryMessage, createCustomMessage } from "../../core/messages.ts";
 import {
+	defaultClassifierPerProvider,
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
 	resolveModelScopeFromModels,
@@ -6088,6 +6089,20 @@ export class InteractiveMode {
 							selectedModel = undefined;
 							const errorMessage = error instanceof Error ? error.message : String(error);
 							selectionError = `${actionLabel}, but selecting its default model failed: ${errorMessage}. Use /model to select a model.`;
+						}
+					}
+				}
+			}
+
+			if (!selectionError && !this.settingsManager.getDefaultClassifierProvider()) {
+				const classifierId = defaultClassifierPerProvider[providerId as keyof typeof defaultClassifierPerProvider];
+				if (classifierId) {
+					const classifier = this.session.modelRuntime.getModelOfType("classifier", providerId, classifierId);
+					if (classifier) {
+						try {
+							await this.session.setClassifierModel(classifier, { persist: true });
+						} catch {
+							// Chat login succeeded; classifier default can be set later with /classifier.
 						}
 					}
 				}
