@@ -134,6 +134,8 @@ export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
 	defaultModel?: string;
+	defaultClassifierProvider?: string;
+	defaultClassifierModel?: string;
 	defaultThinkingLevel?: ThinkingLevel;
 	modelThinkingLevels?: Record<string, ThinkingLevel>; // per-model default thinking level overrides keyed by "provider/modelId"
 	transport?: TransportSetting; // default: "auto"
@@ -824,6 +826,22 @@ export class SettingsManager {
 		this.globalSettings.defaultModel = modelId;
 		this.markModified("defaultProvider");
 		this.markModified("defaultModel");
+		this.save();
+	}
+
+	getDefaultClassifierProvider(): string | undefined {
+		return this.settings.defaultClassifierProvider;
+	}
+
+	getDefaultClassifierModel(): string | undefined {
+		return this.settings.defaultClassifierModel;
+	}
+
+	setDefaultClassifierAndProvider(provider: string, modelId: string): void {
+		this.globalSettings.defaultClassifierProvider = provider;
+		this.globalSettings.defaultClassifierModel = modelId;
+		this.markModified("defaultClassifierProvider");
+		this.markModified("defaultClassifierModel");
 		this.save();
 	}
 

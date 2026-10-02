@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/classifier`, a selector for classifier (decision) models such as Jev. It lists only classifier models with working credentials, sets the session decision model (`AgentSession.classifierModel`), and saves it as the default with Ctrl+S. Added the `defaultClassifierProvider` and `defaultClassifierModel` settings. `/model` stays chat-only. See [Select a classifier model](docs/models.md#select-a-classifier-model).
+
 ### Changed
 
 - `/arminsayshi` now plays a 3D version in fullscreen mode, with one cube per pixel of Armin. The 3D pi logo easter egg on header logo click is replaced by it.
