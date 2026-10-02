@@ -138,8 +138,12 @@ export interface Settings {
 	defaultClassifierModel?: string;
 	/** When unset, decision-driven mode defaults on while a classifier model is configured. */
 	decisionDriven?: boolean;
-	/** Stub for Wave 2b quality gate retries. */
+	/** Maximum draft retries after a failed R1 quality gate (0 disables retries). */
 	maxQualityRetries?: number;
+	/** Minimum classifier confidence before auto-applying a decision (default 0.65). */
+	decisionConfidenceThreshold?: number;
+	/** When false, skips JEV/static security gates before tool execution. Default true. */
+	decisionSecurityGates?: boolean;
 	defaultThinkingLevel?: ThinkingLevel;
 	modelThinkingLevels?: Record<string, ThinkingLevel>; // per-model default thinking level overrides keyed by "provider/modelId"
 	transport?: TransportSetting; // default: "auto"
@@ -855,6 +859,14 @@ export class SettingsManager {
 
 	getMaxQualityRetries(): number | undefined {
 		return this.settings.maxQualityRetries;
+	}
+
+	getDecisionConfidenceThreshold(): number | undefined {
+		return this.settings.decisionConfidenceThreshold;
+	}
+
+	getDecisionSecurityGates(): boolean | undefined {
+		return this.settings.decisionSecurityGates;
 	}
 
 	getSteeringMode(): "all" | "one-at-a-time" {

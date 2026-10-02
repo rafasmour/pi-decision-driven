@@ -29,6 +29,7 @@ import {
 	type AgentTurnDecision,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	createMessageCheckpoint,
 	type PrepareNextTurnContext,
 	runToolCall,
 	type ThinkingLevel,
@@ -88,9 +89,41 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
+import { findLowConfidenceAnswers } from "./decision/confidence-gate.ts";
 import { buildDecisionTurnMessages } from "./decision/decision-follow-up.ts";
+import {
+	applyToolRestriction,
+	createDecisionGateRuntime,
+	type DecisionGateRuntime,
+	qualityGateCardMessages,
+	qualityGateDecisionMessages,
+	rollbackDraft,
+} from "./decision/decision-gates-session.ts";
+import { draftTextFromAssistant, isUserFacingDraft } from "./decision/draft-heuristic.ts";
+import {
+	appendGoalCardRecent,
+	emptyGoalCard,
+	type GoalCard,
+	loadGoalCardFromBranch,
+	persistGoalCard,
+	remainingPlanSteps,
+} from "./decision/goal-card.ts";
+import { goalRefineClassifierContext, mergeRefinedGoalCard } from "./decision/goal-refine.ts";
+import { offPlanClassifierContext, parseOffPlanResult } from "./decision/off-plan.ts";
 import { parseDecisionBlockFromAssistant } from "./decision/parse-decision-block.ts";
-import { toClassifierContext } from "./decision/questionnaire.ts";
+import {
+	applyQualityRouteWithRetries,
+	parseQualityGateResult,
+	qualityGateClassifierContext,
+} from "./decision/quality-gate.ts";
+import { type AskDecisionArguments, toClassifierContext } from "./decision/questionnaire.ts";
+import {
+	isSecuritySensitiveResult,
+	isStaticallyDeniedToolCall,
+	needsSecuritySensitivityClassify,
+	securityClassifierContext,
+} from "./decision/security-gate.ts";
+import { detectToolIntentFromAnswers, intentSummaryFromAnswers, toolNamesForIntent } from "./decision/tool-intent.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -475,6 +508,9 @@ export class AgentSession {
 	/** Prompt options after before_agent_start mutations for the active run. */
 	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
 
+	private _goalCard: GoalCard | undefined;
+	private _decisionGates: DecisionGateRuntime = createDecisionGateRuntime();
+
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
@@ -505,6 +541,7 @@ export class AgentSession {
 		this._installAgentBoundaryHooks();
 		this._installHiddenDeclarationsProjection();
 		this._installAgentForcedPromptProjection();
+		this._installDecisionGatesHooks();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -512,6 +549,7 @@ export class AgentSession {
 		});
 		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
 		this._syncDecisionDrivenMode();
+		this._reloadGoalCard();
 	}
 
 	private _isDecisionDrivenEnabled(): boolean {
@@ -524,7 +562,10 @@ export class AgentSession {
 		this.agent.classify = undefined;
 		this.agent.interpretDecision = undefined;
 		this.agent.decisionConfig = this._isDecisionDrivenEnabled()
-			? { maxQualityRetries: this.settingsManager.getMaxQualityRetries() ?? 0 }
+			? {
+					maxQualityRetries: this.settingsManager.getMaxQualityRetries() ?? 0,
+					confidenceThreshold: this.settingsManager.getDecisionConfidenceThreshold() ?? 0.65,
+				}
 			: undefined;
 		this._rebuildSystemPrompt(this.getActiveToolNames());
 	}
@@ -593,6 +634,9 @@ export class AgentSession {
 		const classified = await this._runDecisionClassify(toClassifierContext(batch), signal);
 		if (classified.stopReason !== "stop") return undefined;
 
+		const postDecision = await this._handlePostDecisionClassification(batch, classified.answers, signal);
+		if (postDecision.blocked) return { action: "end" };
+
 		const followUp = await buildDecisionTurnMessages(batch, classified.answers, {
 			skills: this._resourceLoader.getSkills().skills,
 			modelRuntime: this._modelRuntime,
@@ -604,6 +648,234 @@ export class AgentSession {
 			turn.context.messages.push(message);
 		}
 		return { action: "continue" };
+	}
+
+	private _reloadGoalCard(): void {
+		this._goalCard = loadGoalCardFromBranch(this.sessionManager.getBranch());
+	}
+
+	private async _ensureGoalCardRefined(userMessage: string, signal?: AbortSignal): Promise<void> {
+		if (!this._isDecisionDrivenEnabled()) return;
+		this._reloadGoalCard();
+		if (this._goalCard?.frozen && this._goalCard.goal.trim().length > 0) return;
+		let card = emptyGoalCard();
+		if (this.classifierModel) {
+			const refined = await this._runDecisionClassify(goalRefineClassifierContext(userMessage), signal);
+			card = mergeRefinedGoalCard(userMessage, refined);
+		} else {
+			card = mergeRefinedGoalCard(userMessage, { answers: {}, stopReason: "stop" });
+		}
+		this._goalCard = card;
+		persistGoalCard(this.sessionManager, card);
+	}
+
+	private async _handlePostDecisionClassification(
+		batch: AskDecisionArguments,
+		answers: Record<string, ClassifierResult["answers"][string]>,
+		signal?: AbortSignal,
+	): Promise<{ blocked: boolean }> {
+		const classifierContext = toClassifierContext(batch);
+		const threshold = this.agent.decisionConfig?.confidenceThreshold ?? 0.65;
+		const lowConfidence = findLowConfidenceAnswers(classifierContext.questions, answers, threshold);
+		if (lowConfidence.length > 0) {
+			const confirmed = await this._confirmLowConfidenceDecision(batch, answers, lowConfidence);
+			if (!confirmed) return { blocked: true };
+		}
+
+		const intent = detectToolIntentFromAnswers(batch, answers);
+		const goalCard = this._goalCard ?? emptyGoalCard();
+		if (intent && intent !== "respond") {
+			const offPlanContext = offPlanClassifierContext(goalCard, intent);
+			if (offPlanContext) {
+				const offPlanClassified = await this._runDecisionClassify(offPlanContext, signal);
+				const offPlan = parseOffPlanResult(offPlanClassified, remainingPlanSteps(goalCard).length);
+				if (offPlan.offPlan) {
+					const approved = await this._confirmOffPlanIntent(intent, goalCard);
+					if (!approved) return { blocked: true };
+				}
+			}
+			const restricted = toolNamesForIntent(intent, this.getActiveToolNames());
+			if (restricted && restricted.length > 0) {
+				this._decisionGates.restrictedToolNames = restricted;
+				this._decisionGates.respondAuthorized = false;
+			}
+		} else if (intent === "respond") {
+			this._decisionGates.respondAuthorized = true;
+			this._decisionGates.restrictedToolNames = undefined;
+		}
+
+		if (this._goalCard) {
+			this._goalCard = appendGoalCardRecent(this._goalCard, intentSummaryFromAnswers(batch, answers, intent));
+			persistGoalCard(this.sessionManager, this._goalCard);
+		}
+		return { blocked: false };
+	}
+
+	private async _confirmLowConfidenceDecision(
+		_batch: AskDecisionArguments,
+		answers: Record<string, ClassifierResult["answers"][string]>,
+		low: ReturnType<typeof findLowConfidenceAnswers>,
+	): Promise<boolean> {
+		const ui = this._extensionUIContext;
+		if (!ui || this._extensionMode !== "tui") return true;
+		const lines = low.map((entry) => {
+			const answer = answers[entry.questionId];
+			const label =
+				answer?.type === "choice"
+					? answer.choice
+					: answer?.type === "bool"
+						? answer.probability >= 0.5
+							? "yes"
+							: "no"
+						: "?";
+			return `${entry.questionId}: ${label} (${Math.round(entry.confidence * 100)}%)`;
+		});
+		return ui.confirm(
+			"Low-confidence decision",
+			`Classifier confidence is below threshold:\n${lines.join("\n")}\n\nApply these answers anyway?`,
+		);
+	}
+
+	private async _confirmOffPlanIntent(intent: string, goalCard: GoalCard): Promise<boolean> {
+		const ui = this._extensionUIContext;
+		if (!ui || this._extensionMode !== "tui") return false;
+		const steps = remainingPlanSteps(goalCard);
+		return ui.confirm(
+			"Off-plan intent",
+			`Intent "${intent}" does not match remaining plan steps:\n${steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\nProceed anyway?`,
+		);
+	}
+
+	private async _maybeRunQualityGate(
+		turn: AgentTurnContext,
+		signal?: AbortSignal,
+	): Promise<AgentTurnDecision | undefined> {
+		if (!this._isDecisionDrivenEnabled()) return undefined;
+		if (!isUserFacingDraft(turn.message)) return undefined;
+		if (!this._decisionGates.respondAuthorized && this._decisionGates.restrictedToolNames) return undefined;
+
+		const goalCard = this._goalCard ?? emptyGoalCard();
+		const draft = draftTextFromAssistant(turn.message);
+		const gateContext = qualityGateClassifierContext(goalCard, draft);
+		const classified = await this._runDecisionClassify(gateContext, signal);
+		const parsed = parseQualityGateResult(classified);
+		const maxRetries = this.agent.decisionConfig?.maxQualityRetries ?? 0;
+		const route = applyQualityRouteWithRetries(parsed, this._decisionGates.qualityRetriesUsed, maxRetries);
+
+		const gateBatch: AskDecisionArguments = {
+			questions: [
+				{ id: "routing", prompt: "Quality gate routing" },
+				{ id: "on_goal", prompt: "On goal?" },
+			],
+			goal: goalCard.goal,
+		};
+		const gateDetails = qualityGateDecisionMessages(
+			gateBatch,
+			classified.answers,
+			goalCard.goal,
+			parsed.onGoal,
+			route,
+		);
+		const gateCards = qualityGateCardMessages(gateBatch, gateDetails);
+		this._persistInjectedMessages(
+			gateCards.map((message) => ({
+				role: "custom" as const,
+				customType: message.customType,
+				content: message.content,
+				display: message.display,
+				details: message.details,
+				timestamp: message.timestamp,
+			})),
+		);
+
+		if (route === "prompt_user") {
+			this._decisionGates.qualityRetriesUsed = 0;
+			return undefined;
+		}
+		if (route === "incomplete_continue") {
+			return { action: "continue" };
+		}
+		if (route === "poor_quality_prompt_user") {
+			const ui = this._extensionUIContext;
+			if (ui && this._extensionMode === "tui") {
+				const keep = await ui.confirm(
+					"Draft quality",
+					`Draft scored ${Math.round(parsed.onGoal * 100)}% on goal. Keep this draft anyway?`,
+				);
+				if (keep) {
+					this._decisionGates.qualityRetriesUsed = 0;
+					return undefined;
+				}
+			}
+		}
+
+		const checkpoint = this._decisionGates.draftCheckpoint;
+		if (checkpoint === undefined) return undefined;
+		this._omitRecoveryAttempt(turn.message);
+		rollbackDraft(turn.context.messages, checkpoint);
+		this._refreshFinalizedContext();
+		this._decisionGates.qualityRetriesUsed++;
+		turn.context.messages.push({
+			role: "user",
+			content:
+				"<decision_harness>Previous draft failed the quality gate. Try again against the GoalCard.</decision_harness>",
+			timestamp: Date.now(),
+		});
+		this.sessionManager.appendMessage({
+			role: "user",
+			content:
+				"<decision_harness>Previous draft failed the quality gate. Try again against the GoalCard.</decision_harness>",
+			timestamp: Date.now(),
+		});
+		return { action: "continue" };
+	}
+
+	private async _decisionSecurityBeforeToolCall(
+		toolCall: BeforeToolCallContext["toolCall"],
+		args: BeforeToolCallContext["args"],
+		signal?: AbortSignal,
+	): Promise<BeforeToolCallResult | undefined> {
+		if (!this._isDecisionDrivenEnabled()) return undefined;
+		if (this.settingsManager.getDecisionSecurityGates() === false) return undefined;
+		const record = args as Record<string, unknown>;
+		if (isStaticallyDeniedToolCall(toolCall.name, record)) {
+			return { block: true, reason: "Blocked by decision-driven security policy", terminate: true };
+		}
+		if (!needsSecuritySensitivityClassify(toolCall.name, record) || !this.classifierModel) return undefined;
+		const classified = await this._runDecisionClassify(securityClassifierContext(toolCall.name, record), signal);
+		if (!isSecuritySensitiveResult(classified)) return undefined;
+		const ui = this._extensionUIContext;
+		if (ui && this._extensionMode === "tui") {
+			const approved = await ui.confirm(
+				"Security review",
+				`Tool ${toolCall.name} may be security-sensitive. Execute anyway?`,
+			);
+			if (!approved) return { block: true, reason: "Rejected at security gate", terminate: true };
+			return undefined;
+		}
+		return { block: true, reason: "Security-sensitive tool requires TUI approval", terminate: true };
+	}
+
+	private _installDecisionGatesHooks(): void {
+		const previousPrepareRequest = this.agent.prepareRequest;
+		this.agent.prepareRequest = async (request, signal) => {
+			const previousUpdate = await previousPrepareRequest?.(request, signal);
+			let context = previousUpdate?.context ?? request.context;
+			if (this._isDecisionDrivenEnabled()) {
+				this._decisionGates.draftCheckpoint = createMessageCheckpoint(context.messages);
+				if (this._decisionGates.restrictedToolNames?.length) {
+					context = applyToolRestriction(context, this._decisionGates.restrictedToolNames);
+				}
+			}
+			return { ...previousUpdate, context };
+		};
+
+		const previousBeforeToolCall = this.agent.beforeToolCall;
+		this.agent.beforeToolCall = async (context, signal) => {
+			const security = await this._decisionSecurityBeforeToolCall(context.toolCall, context.args, signal);
+			if (security?.block) return security;
+			return previousBeforeToolCall?.(context, signal);
+		};
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -971,6 +1243,11 @@ export class AgentSession {
 			const extensionContinue = await this._dispatchTurnEndBoundary(turn.message, turn.toolResults);
 			const previousDecision = await previousFinishTurn?.(turn, signal);
 			if (previousDecision?.action === "end") return previousDecision;
+			if (turn.toolResults.length > 0) {
+				this._decisionGates.restrictedToolNames = undefined;
+			}
+			const quality = await this._maybeRunQualityGate(turn, signal);
+			if (quality) return quality;
 			const classified = await this._maybeClassifyParsedDecisions(turn, signal);
 			if (classified) return classified;
 			if (extensionContinue || previousDecision?.action === "continue") return { action: "continue" };
@@ -2211,6 +2488,7 @@ export class AgentSession {
 		if (updateMessage) messages.unshift(updateMessage);
 
 		preflightResult?.("started");
+		await this._ensureGoalCardRefined(userText);
 		await this._runAgentPrompt(messages);
 	}
 
