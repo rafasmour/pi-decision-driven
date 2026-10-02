@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
+import type { AuthEvent, AuthPrompt, ModelTypeMap } from "@earendil-works/pi-ai";
 import {
 	type AssistantMessage,
 	type ImageContent,
@@ -136,6 +136,7 @@ import { playArmin3d } from "./components/armin-3d.lazy.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
+import { ClassifierSelectorComponent, NO_CLASSIFIERS_MESSAGE } from "./components/classifier-selector.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomEntryComponent } from "./components/custom-entry.ts";
@@ -3144,6 +3145,12 @@ export class InteractiveMode {
 				await this.handleModelCommand(searchTerm);
 				return;
 			}
+			if (text === "/classifier" || text.startsWith("/classifier ")) {
+				const searchTerm = text.startsWith("/classifier ") ? text.slice(12).trim() : undefined;
+				this.editor.setText("");
+				await this.handleClassifierCommand(searchTerm);
+				return;
+			}
 			if (text === "/thinking" || text.startsWith("/thinking ")) {
 				const searchTerm = text.startsWith("/thinking ") ? text.slice(10).trim() : undefined;
 				this.editor.setText("");
@@ -5120,6 +5127,71 @@ export class InteractiveMode {
 		}
 
 		this.showModelSelector(searchTerm);
+	}
+
+	private async handleClassifierCommand(searchTerm?: string): Promise<void> {
+		let classifiers: readonly ModelTypeMap["classifier"][];
+		try {
+			classifiers = await this.session.modelRuntime.getAvailableOfType("classifier");
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
+		if (classifiers.length === 0) {
+			this.showWarning(NO_CLASSIFIERS_MESSAGE);
+			return;
+		}
+		const exact = searchTerm
+			? classifiers.find((model) => `${model.provider}/${model.id}`.toLowerCase() === searchTerm.toLowerCase())
+			: undefined;
+		if (exact) {
+			try {
+				await this.session.setClassifierModel(exact);
+				this.showStatus(`Classifier: ${exact.provider}/${exact.id}`);
+			} catch (error) {
+				this.showError(error instanceof Error ? error.message : String(error));
+			}
+			return;
+		}
+		this.showClassifierSelector(classifiers, searchTerm);
+	}
+
+	private showClassifierSelector(
+		classifiers: readonly ModelTypeMap["classifier"][],
+		initialSearchInput?: string,
+	): void {
+		this.showSelector((done) => {
+			const selectClassifier = async (model: ModelTypeMap["classifier"], persist: boolean) => {
+				try {
+					await this.session.setClassifierModel(model, { persist });
+					done();
+					this.showStatus(
+						persist
+							? `Default classifier: ${model.provider}/${model.id}`
+							: `Classifier: ${model.provider}/${model.id}`,
+					);
+				} catch (error) {
+					done();
+					this.showError(error instanceof Error ? error.message : String(error));
+				}
+			};
+			const defaultProvider = this.settingsManager.getDefaultClassifierProvider();
+			const defaultModel = this.settingsManager.getDefaultClassifierModel();
+			const selector = new ClassifierSelectorComponent(
+				this.ui,
+				this.session.classifierModel,
+				classifiers,
+				(model) => selectClassifier(model, false),
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+				initialSearchInput,
+				(model) => selectClassifier(model, true),
+				defaultProvider && defaultModel ? { provider: defaultProvider, id: defaultModel } : undefined,
+			);
+			return { component: selector, focus: selector };
+		});
 	}
 
 	private async findExactModelMatch(searchTerm: string): Promise<Model<any> | undefined> {

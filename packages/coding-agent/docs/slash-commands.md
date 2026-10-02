@@ -9,7 +9,8 @@ Extensions, prompt templates, and skills can add commands. The command menu in P
 | Command | Description |
 |---|---|
 | `/settings` | Open settings |
-| `/model [provider/model]` | Select a model |
+| `/model [provider/model]` | Select a chat model |
+| `/classifier [provider/model]` | Select a classifier (decision) model; Ctrl+S saves it as the default |
 | `/thinking [level]` | Set the thinking level |
 | `/scoped-models` | Configure the models used by interactive cycling |
 | `/login [provider]` | Add provider authentication |

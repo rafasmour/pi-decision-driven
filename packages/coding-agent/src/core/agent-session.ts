@@ -31,7 +31,14 @@ import {
 	runToolCall,
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText, getCurrentSystemMessage, retryDelayMs } from "@earendil-works/pi-ai";
+import {
+	type AnyModel,
+	contentText,
+	getCurrentSystemMessage,
+	isModelType,
+	type ModelTypeMap,
+	retryDelayMs,
+} from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -365,6 +372,8 @@ export class AgentSession {
 	readonly settingsManager: SettingsManager;
 
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	/** Classifier (decision) model chosen for this session; overrides the saved default. */
+	private _classifierModel: ModelTypeMap["classifier"] | undefined;
 
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
@@ -1411,6 +1420,36 @@ export class AgentSession {
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model<any> | undefined {
 		return this.agent.state.model;
+	}
+
+	/**
+	 * Decision model for this session: the one picked with `/classifier`, otherwise the saved
+	 * `defaultClassifierProvider`/`defaultClassifierModel`, if it still resolves to a classifier model.
+	 */
+	get classifierModel(): ModelTypeMap["classifier"] | undefined {
+		if (this._classifierModel) return this._classifierModel;
+		const provider = this.settingsManager.getDefaultClassifierProvider();
+		const modelId = this.settingsManager.getDefaultClassifierModel();
+		if (!provider || !modelId) return undefined;
+		return this._modelRuntime.getModelOfType("classifier", provider, modelId);
+	}
+
+	/**
+	 * Set the session decision model. Does not touch the chat model or the session transcript.
+	 * Persists to global defaults only when options.persist is true.
+	 * @throws Error if the model is not a classifier model or no auth is configured for it
+	 */
+	async setClassifierModel(model: AnyModel, options: ModelMutationOptions = {}): Promise<void> {
+		if (!isModelType(model, "classifier")) {
+			throw new Error(`${model.provider}/${model.id} is not a classifier model`);
+		}
+		if (!(await this._modelRuntime.checkAuth(model.provider))) {
+			throw new Error(`No API key for ${model.provider}/${model.id}`);
+		}
+		this._classifierModel = model;
+		if (options.persist) {
+			this.settingsManager.setDefaultClassifierAndProvider(model.provider, model.id);
+		}
 	}
 
 	/** Current thinking level */

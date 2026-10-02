@@ -434,6 +434,7 @@ export {
 	BashExecutionComponent,
 	BorderedLoader,
 	BranchSummaryMessageComponent,
+	ClassifierSelectorComponent,
 	CompactionSummaryMessageComponent,
 	CustomEditor,
 	type CustomEditorOptions,

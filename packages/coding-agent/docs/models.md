@@ -114,6 +114,20 @@ Classifier models do not chat. They answer typed questions about JSON state: pic
 
 Chat models on a [llama.cpp router](llama-cpp.md#classification) are also listed as classifier models.
 
+### Select a classifier model
+
+Classifier models do not appear in `/model`, which stays chat-only. Use `/classifier` to browse them instead. It opens a selector like `/model`, listing only classifier models whose provider has working credentials. Type to filter, press Enter to use a model for this session, or press Ctrl+S to also save it as the default.
+
+```text
+/classifier                      open the selector
+/classifier typesafe/jev-latest  select a model directly
+/classifier jev                  open the selector filtered by "jev"
+```
+
+The session classifier is the decision model that decision-driven features use. Saving it with Ctrl+S writes `defaultClassifierProvider` and `defaultClassifierModel` to the global [settings](settings.md#model-and-thinking); new sessions start with that model. If no classifier is available, `/classifier` says so. Set `TYPESAFE_API_KEY`, sign in with `/login`, or load a classifier on a llama.cpp router with `/llama`.
+
+### Call classifier models from scripts
+
 Classifier models do not appear in `/model`. The model reaches them through the [`codemode`](cli.md#enable-codemode) tool, which is off unless an MCP server turned it on. Enable it with `"defaultTools": ["+codemode"]` in [settings](settings.md#tools). Scripts then list classifier models with `models.getAvailableOfType("classifier")` and call `models.classify(model, { state, questions })`:
 
 ```js
