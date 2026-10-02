@@ -49,6 +49,20 @@ export {
 	serializeConversation,
 	shouldCompact,
 } from "./core/compaction/index.ts";
+// Decision card data model
+export {
+	DECISION_REQUEST_MESSAGE_TYPE,
+	DECISION_RESULT_MESSAGE_TYPE,
+	type DecisionAnswer,
+	type DecisionBoolAnswer,
+	type DecisionChoiceAnswer,
+	type DecisionOption,
+	type DecisionQuestion,
+	type DecisionRequest,
+	type DecisionResult,
+	isDecisionRequest,
+	isDecisionResult,
+} from "./core/decision/types.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 // Extension system
 export type {
@@ -439,7 +453,10 @@ export {
 	CustomEditor,
 	type CustomEditorOptions,
 	CustomMessageComponent,
+	DecisionRequestCard,
+	DecisionResultCard,
 	DynamicBorder,
+	decisionMessageRenderer,
 	ExtensionEditorComponent,
 	ExtensionInputComponent,
 	ExtensionSelectorComponent,

@@ -4,6 +4,7 @@ import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@ear
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { decisionMessageRenderer } from "./decision-card.ts";
 
 /**
  * Component that renders a custom message entry from extensions.
@@ -65,22 +66,18 @@ export class CustomMessageComponent extends Container {
 		}
 		this.removeChild(this.box);
 
-		// Try custom renderer first - it handles its own styling
-		if (this.customRenderer) {
+		// Try the extension renderer first, then built-in renderers. They handle their own styling.
+		for (const renderer of [this.customRenderer, decisionMessageRenderer]) {
+			if (!renderer) continue;
 			try {
-				const component = this.customRenderer(
-					this.message,
-					{ expanded: this._expanded, outputPad: this.outputPad },
-					theme,
-				);
+				const component = renderer(this.message, { expanded: this._expanded, outputPad: this.outputPad }, theme);
 				if (component) {
-					// Custom renderer provides its own styled component
 					this.customComponent = component;
 					this.addChild(component);
 					return;
 				}
 			} catch {
-				// Fall through to default rendering
+				// Fall through to the next renderer or default rendering
 			}
 		}
 

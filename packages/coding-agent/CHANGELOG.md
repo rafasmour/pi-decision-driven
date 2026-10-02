@@ -5,6 +5,7 @@
 ### Added
 
 - Added `/classifier`, a selector for classifier (decision) models such as Jev. It lists only classifier models with working credentials, sets the session decision model (`AgentSession.classifierModel`), and saves it as the default with Ctrl+S. Added the `defaultClassifierProvider` and `defaultClassifierModel` settings. `/model` stays chat-only. See [Select a classifier model](docs/models.md#select-a-classifier-model).
+- Added decision request and result cards. Interactive mode renders custom messages of type `decision-request` and `decision-result` with `DecisionRequestCard` and `DecisionResultCard`: result cards show the chosen answer with a compact probability bar and expand to full per-option scores. The `decision-cards.ts` example extension adds `/decision-demo` to show them from fixtures.
 
 ### Changed
 
