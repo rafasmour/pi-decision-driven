@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `questionsToClassifierContext()` to map questionnaire batches to a `ClassifierContext` (`bool` for missing options or yes/no pairs, `choice` otherwise), and `summarizeClassifierAnswers()` to render classifier answers as transcript text.
+
 ## [1.0.0] - 2026-10-01
 
 ### Added
