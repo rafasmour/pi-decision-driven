@@ -50,6 +50,15 @@ ${DECISION_BLOCK_FENCE}
 \`\`\``);
 		expect(toClassifierContext(batch!).questions.x?.type).toBe("bool");
 	});
+
+	it("merges batch.goal into classifier state.goal", () => {
+		const context = toClassifierContext({
+			goal: "Ship the feature",
+			state: { turn: 1 },
+			questions: [{ id: "go", prompt: "Proceed?" }],
+		});
+		expect(context.state).toMatchObject({ turn: 1, goal: "Ship the feature" });
+	});
 });
 
 describe("decision follow-up messages", () => {

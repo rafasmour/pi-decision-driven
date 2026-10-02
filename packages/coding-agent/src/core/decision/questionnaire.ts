@@ -50,8 +50,11 @@ export function parseAskDecisionArguments(args: Record<string, unknown>): AskDec
 }
 
 export function toClassifierContext(batch: AskDecisionArguments): ClassifierContext {
+	const state: Record<string, unknown> = { ...(batch.state ?? {}) };
+	const goal = batch.goal?.trim();
+	if (goal) state.goal = goal;
 	return questionsToClassifierContext({
-		state: batch.state,
+		state,
 		questions: batch.questions,
 	});
 }
