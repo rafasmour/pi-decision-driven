@@ -29,7 +29,7 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
 	skills?: Skill[];
-	/** Decision-driven mode: text ```decisions``` blocks and S4 skill index behavior. */
+	/** Decision-driven mode: plain-text questions + tools only; S4 skill index behavior. */
 	decisionDriven?: boolean;
 }
 
@@ -148,7 +148,15 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		promptSections.preamble = customPrompt;
 	} else {
 		promptSections.preamble = decisionDriven
-			? "You are the chat model in pi's decision-driven harness. Your job is to ask scrapeable questions; the classifier (JEV) and human gates decide outcomes — you do not pick options or commit to a plan yourself. Until the harness returns classified answers, output questions only (```decisions``` block, see decisions_format): no tool calls, no file edits, no implementation. After authorization: (1) ask — ```decisions``` when intent is unclear; (2) tool-call — use tools only when the loop selected a tool intent; (3) write code — edit or write files only when that intent was chosen."
+			? [
+					"You are the chat model in pi's decision-driven harness.",
+					"You have exactly two modes:",
+					"1. Ask — call the ask_decision tool with structured questions (yes/no or multiple choice).",
+					"2. Act — call other tools to do the work.",
+					"Nothing else. Do not output JSON decision blocks in prose. Do not invent answers. Do not implement in prose without tools. Do not skip asking when the next step depends on a choice.",
+					"The harness and classifier answer ask_decision; you act on the tool result.",
+					"Until ask_decision returns answers, stay in Ask (read-only tools only if needed). After answers appear, Act with tools as authorized.",
+				].join(" ")
 			: "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
 		const visibleTools = selectedTools.filter((name) => !!toolSnippets[name]);
 		const tools =
@@ -169,24 +177,31 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 	if (contextFiles.length > 0) promptSections.project_context = renderProjectContext(contextFiles);
 	const skillFileReadTool = (["read", "bash"] as const).find((tool) => selectedTools.includes(tool));
 	if (decisionDriven) {
-		promptSections.decisions_format = [
-			"Emit exactly one ```decisions block when you need answers before acting:",
-			"```decisions",
+		promptSections.ask_decision = [
+			"When you need a decision before acting, call ask_decision. Example arguments:",
+			"",
 			"{",
-			'  "goal": "optional one-line goal",',
-			'  "state": { "optional": "context for the classifier" },',
+			'  "goal": "Ship safely",',
 			'  "questions": [',
-			'    { "id": "unique_id", "prompt": "Yes or no question?" },',
-			'    { "id": "pick", "prompt": "Choose approach", "options": [{ "value": "a", "label": "Short intent label" }] }',
+			'    { "id": "tests", "prompt": "Should we add tests for this change?" },',
+			'    {',
+			'      "id": "storage",',
+			'      "prompt": "Which storage should we use?",',
+			'      "options": [',
+			'        { "value": "pg", "label": "Postgres" },',
+			'        { "value": "sqlite", "label": "SQLite" }',
+			"      ]",
+			"    }",
 			"  ]",
 			"}",
-			"```",
-			"Omit options for yes/no. Provide options (value + label) for multiple choice. Labels describe intents, not full tool arguments.",
+			"",
+			"Omit options for yes/no. Include options for multiple choice. Keep state compact when you pass it.",
+			"Do not put decisions in markdown fences or freeform JSON in assistant text — use the tool.",
 		].join("\n");
 		const visibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
 		if (visibleSkills.length > 0) {
 			promptSections.skills =
-				"Skills are not listed inline. Include a yes/no question (id skill_help) in a decisions block when skill guidance may help; the harness classifies and injects the best skill. Users can still invoke /skill:name directly.";
+				'Skills are not listed inline. Ask via ask_decision whether skill guidance would help (e.g. id "skill_help", prompt "Would skill guidance help?"); the harness classifies and injects the best skill. Users can still invoke /skill:name directly.';
 		}
 	} else if (skillFileReadTool && skills.length > 0) {
 		const skillsPrompt = formatSkillsForPrompt(skills, skillFileReadTool).trim();

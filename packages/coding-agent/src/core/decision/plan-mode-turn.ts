@@ -28,7 +28,9 @@ export interface PlanModeClassifyHooks {
 	) => Promise<Pick<ClassifierResult, "answers" | "stopReason" | "errorMessage">>;
 }
 
-export type PlanModeTurnResult = { status: "blocked" } | { status: "continue"; messages: AgentMessage[] };
+export type PlanModeTurnResult =
+	| { status: "blocked" }
+	| { status: "continue"; messages: AgentMessage[]; answers: Record<string, ClassifierAnswer> };
 
 export async function resolvePlanModeDecisionTurn(
 	batch: AskDecisionArguments,
@@ -93,5 +95,5 @@ export async function resolvePlanModeDecisionTurn(
 		});
 	}
 
-	return { status: "continue", messages: followUp };
+	return { status: "continue", messages: followUp, answers: mergedAnswers };
 }

@@ -84,6 +84,10 @@ function createSession(options: {
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
 		routedModel: options.routedModel,
+		classifierModel: undefined,
+		settingsManager: {
+			getDecisionDriven: () => false,
+		},
 		modelRuntime: {
 			isUsingSubscription: () => options.usingSubscription ?? false,
 		},

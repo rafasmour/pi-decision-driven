@@ -243,6 +243,13 @@ export class FooterComponent implements Component {
 			const level = routed.thinkingLevel ? ` • ${routed.thinkingLevel}` : "";
 			rightSideWithoutProvider += ` → ${routed.model.id}${level}`;
 		}
+		// Decision classifier (separate from chat /model)
+		const classifier = this.session.classifierModel;
+		if (classifier) {
+			rightSideWithoutProvider += ` | ${classifier.provider}/${classifier.id}`;
+		} else if (this.session.settingsManager.getDecisionDriven() !== false) {
+			rightSideWithoutProvider += " | no-classifier";
+		}
 
 		// Prepend the provider in parentheses if there are multiple providers and there's enough room
 		let rightSide = rightSideWithoutProvider;

@@ -29,6 +29,8 @@ import {
 	type AgentTurnDecision,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	DECISION_TOOL_NAME,
+	type DecisionResultContext,
 	createMessageCheckpoint,
 	type PrepareNextTurnContext,
 	runToolCall,
@@ -111,6 +113,7 @@ import {
 import { goalRefineClassifierContext, mergeRefinedGoalCard } from "./decision/goal-refine.ts";
 import { offPlanClassifierContext, parseOffPlanResult } from "./decision/off-plan.ts";
 import { parseDecisionBlockFromAssistant } from "./decision/parse-decision-block.ts";
+import { decisionPreAuthToolNames } from "./decision/pre-auth-tools.ts";
 import { isPlanModePlanning, loadPlanModeFromBranch } from "./decision/plan-mode-state.ts";
 import { resolvePlanModeDecisionTurn } from "./decision/plan-mode-turn.ts";
 import { planModeSystemSection } from "./decision/plan-routing.ts";
@@ -119,7 +122,8 @@ import {
 	parseQualityGateResult,
 	qualityGateClassifierContext,
 } from "./decision/quality-gate.ts";
-import { type AskDecisionArguments, toClassifierContext } from "./decision/questionnaire.ts";
+import { type AskDecisionArguments, parseAskDecisionArguments, toClassifierContext } from "./decision/questionnaire.ts";
+import { scrapePlainQuestionsFromText } from "./decision/scrape-plain-questions.ts";
 import {
 	isSecuritySensitiveResult,
 	isStaticallyDeniedToolCall,
@@ -189,6 +193,7 @@ import {
 	type NormalizedBuildSystemPromptOptions,
 	normalizeBuildSystemPromptOptions,
 } from "./system-prompt.ts";
+import { createAskDecisionToolDefinition } from "./tools/ask-decision.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
@@ -513,6 +518,12 @@ export class AgentSession {
 
 	private _goalCard: GoalCard | undefined;
 	private _decisionGates: DecisionGateRuntime = createDecisionGateRuntime();
+	/** Last ask_decision args captured from tool_execution_start (for plan routing / interpret). */
+	private _pendingAskDecisionBatch: AskDecisionArguments | undefined;
+	/** Follow-up messages prepared during classify (plan mode) for interpretDecision. */
+	private _pendingInterpretMessages: AgentMessage[] | undefined;
+	/** When true, finishTurn ends the run after a blocked post-decision gate. */
+	private _decisionBlockRun = false;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -561,16 +572,122 @@ export class AgentSession {
 	}
 
 	private _syncDecisionDrivenMode(): void {
-		this.agent.decisionDriven = undefined;
-		this.agent.classify = undefined;
-		this.agent.interpretDecision = undefined;
-		this.agent.decisionConfig = this._isDecisionDrivenEnabled()
-			? {
-					maxQualityRetries: this.settingsManager.getMaxQualityRetries() ?? 0,
-					confidenceThreshold: this.settingsManager.getDecisionConfidenceThreshold() ?? 0.65,
-				}
-			: undefined;
+		const enabled = this._isDecisionDrivenEnabled();
+		this._ensureAskDecisionTool(enabled);
+
+		if (!enabled) {
+			this.agent.decisionDriven = undefined;
+			this.agent.classify = undefined;
+			this.agent.interpretDecision = undefined;
+			this.agent.decisionConfig = undefined;
+			this._decisionGates.restrictedToolNames = undefined;
+			this._decisionGates.respondAuthorized = false;
+			this._pendingAskDecisionBatch = undefined;
+			this._pendingInterpretMessages = undefined;
+			this._decisionBlockRun = false;
+			this._rebuildSystemPrompt(this.getActiveToolNames());
+			return;
+		}
+
+		this.agent.decisionDriven = true;
+		this.agent.classify = (context, signal) => this._classifyForDecisionLoop(context, signal);
+		this.agent.interpretDecision = (decision, signal) => this._interpretDecision(decision, signal);
+		this.agent.decisionConfig = {
+			maxQualityRetries: this.settingsManager.getMaxQualityRetries() ?? 0,
+			confidenceThreshold: this.settingsManager.getDecisionConfidenceThreshold() ?? 0.65,
+		};
+		if (!this._decisionGates.respondAuthorized) {
+			const preAuth = decisionPreAuthToolNames(this.getActiveToolNames());
+			this._decisionGates.restrictedToolNames = preAuth.length > 0 ? preAuth : [];
+		}
 		this._rebuildSystemPrompt(this.getActiveToolNames());
+	}
+
+	private _ensureAskDecisionTool(enabled: boolean): void {
+		const hasTool = this._baseToolDefinitions.has(DECISION_TOOL_NAME);
+		if (enabled && !hasTool) {
+			this._baseToolDefinitions.set(DECISION_TOOL_NAME, createAskDecisionToolDefinition());
+			this._refreshToolRegistry({
+				activeToolNames: [...this.getActiveToolNames(), DECISION_TOOL_NAME],
+			});
+			return;
+		}
+		if (enabled && hasTool) {
+			const active = this.getActiveToolNames();
+			if (!active.includes(DECISION_TOOL_NAME)) {
+				this._setActiveTools([...active, DECISION_TOOL_NAME]);
+			}
+			return;
+		}
+		if (!enabled && hasTool) {
+			this._baseToolDefinitions.delete(DECISION_TOOL_NAME);
+			this._refreshToolRegistry({
+				activeToolNames: this.getActiveToolNames().filter((name) => name !== DECISION_TOOL_NAME),
+			});
+		}
+	}
+
+	private async _classifyForDecisionLoop(
+		context: ClassifierContext,
+		signal?: AbortSignal,
+	): Promise<Pick<ClassifierResult, "answers" | "stopReason" | "errorMessage">> {
+		const batch = this._pendingAskDecisionBatch;
+		const planState = loadPlanModeFromBranch(this.sessionManager.getBranch());
+		if (batch && isPlanModePlanning(planState)) {
+			const goalCard = this._goalCard ?? emptyGoalCard();
+			const planTurn = await resolvePlanModeDecisionTurn(batch, {
+				goalCard,
+				hooks: { classify: (ctx, classifySignal) => this._runDecisionClassify(ctx, classifySignal) },
+				ui: this._extensionUIContext,
+				mode: this._extensionMode,
+				skills: this._resourceLoader.getSkills().skills,
+				modelRuntime: this._modelRuntime,
+				signal,
+			});
+			if (planTurn.status === "blocked") {
+				this._pendingInterpretMessages = undefined;
+				return { answers: {}, stopReason: "error", errorMessage: "Plan-mode decision blocked" };
+			}
+			this._pendingInterpretMessages = planTurn.messages;
+			return { answers: planTurn.answers, stopReason: "stop" };
+		}
+		return this._runDecisionClassify(context, signal);
+	}
+
+	private async _interpretDecision(
+		decision: DecisionResultContext,
+		signal?: AbortSignal,
+	): Promise<AgentMessage[] | undefined> {
+		if (this._pendingInterpretMessages) {
+			const messages = this._pendingInterpretMessages;
+			this._pendingInterpretMessages = undefined;
+			this._pendingAskDecisionBatch = undefined;
+			return messages;
+		}
+
+		const batch =
+			this._pendingAskDecisionBatch ??
+			parseAskDecisionArguments(
+				(decision.message.content.find(
+					(part): part is Extract<(typeof decision.message.content)[number], { type: "toolCall" }> =>
+						part.type === "toolCall" && part.name === DECISION_TOOL_NAME,
+				)?.arguments ?? {}) as Record<string, unknown>,
+			);
+		this._pendingAskDecisionBatch = undefined;
+		if (!batch) return undefined;
+
+		const postDecision = await this._handlePostDecisionClassification(batch, decision.answers, signal);
+		if (postDecision.blocked) {
+			this._decisionBlockRun = true;
+			return undefined;
+		}
+
+		return buildDecisionTurnMessages(batch, decision.answers, {
+			skills: this._resourceLoader.getSkills().skills,
+			modelRuntime: this._modelRuntime,
+			classifier: this.classifierModel,
+			signal,
+		});
 	}
 
 	private async _runDecisionClassify(
@@ -631,7 +748,26 @@ export class AgentSession {
 		const toolCalls = turn.message.content.filter((part) => part.type === "toolCall");
 		if (toolCalls.length > 0 || turn.toolResults.length > 0) return undefined;
 
-		const batch = parseDecisionBlockFromAssistant(turn.message);
+		const textState: Record<string, unknown> = {};
+		const goal = this._goalCard?.goal?.trim();
+		if (goal) textState.goal = goal;
+		const lastUser = [...turn.context.messages].reverse().find((message) => message.role === "user");
+		if (lastUser && "content" in lastUser) {
+			const userText =
+				typeof lastUser.content === "string"
+					? lastUser.content
+					: Array.isArray(lastUser.content)
+						? lastUser.content
+								.filter((part): part is { type: "text"; text: string } => part.type === "text")
+								.map((part) => part.text)
+								.join("\n")
+						: "";
+			if (userText.trim()) textState.user_request = userText.trim().slice(0, 2000);
+		}
+
+		const batch =
+			parseDecisionBlockFromAssistant(turn.message) ??
+			scrapePlainQuestionsFromText(contentText(turn.message.content, ""), textState);
 		if (!batch) return undefined;
 
 		const planState = loadPlanModeFromBranch(this.sessionManager.getBranch());
@@ -1270,7 +1406,11 @@ export class AgentSession {
 			const extensionContinue = await this._dispatchTurnEndBoundary(turn.message, turn.toolResults);
 			const previousDecision = await previousFinishTurn?.(turn, signal);
 			if (previousDecision?.action === "end") return previousDecision;
-			if (turn.toolResults.length > 0) {
+			if (this._decisionBlockRun) {
+				this._decisionBlockRun = false;
+				return { action: "end" };
+			}
+			if (turn.toolResults.length > 0 && this._decisionGates.respondAuthorized) {
 				this._decisionGates.restrictedToolNames = undefined;
 			}
 			const quality = await this._maybeRunQualityGate(turn, signal);
@@ -1487,6 +1627,12 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "tool_execution_start" && event.toolName === DECISION_TOOL_NAME) {
+			this._pendingAskDecisionBatch = parseAskDecisionArguments(
+				(event.args ?? {}) as Record<string, unknown>,
+			);
+			this._pendingInterpretMessages = undefined;
+		}
 		// Record the calls a tool made through ctx.executeTool() and their usage on its result message.
 		if (this._nestedToolCalls) {
 			if (event.type === "message_start" && event.message.role === "toolResult") {
@@ -2129,9 +2275,9 @@ export class AgentSession {
 			sections,
 			promptGuidelines: decisionDriven
 				? [
-						"Do not skip asking to implement, guess, or self-select an option — emit a ```decisions block and wait",
-						"No tools or code in the same turn as a decisions block",
-						"One decisions block per decision point until the harness authorizes the next phase",
+						"Exactly two modes: Ask (ask_decision tool) or Act (other tools)",
+						"Do not put decisions in prose JSON or markdown fences — call ask_decision",
+						"Do not skip asking to implement or guess — ask_decision and wait for harness answers",
 					]
 				: [],
 		});
@@ -4069,6 +4215,7 @@ export class AgentSession {
 			activeToolNames: baseActiveToolNames,
 			includeAllExtensionTools: options.includeAllExtensionTools,
 		});
+		this._syncDecisionDrivenMode();
 	}
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {

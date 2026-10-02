@@ -1,7 +1,8 @@
 import { type AssistantMessage, contentText } from "@earendil-works/pi-ai";
 import { DECISION_BLOCK_FENCE, parseDecisionBlockFromText } from "./parse-decision-block.ts";
+import { scrapePlainQuestionsFromText } from "./scrape-plain-questions.ts";
 
-/** Tool-free assistant turn with no ```decisions fence — candidate user-facing draft for R1. */
+/** Tool-free assistant turn that is not a question turn — candidate user-facing draft for R1. */
 export function isUserFacingDraft(message: AssistantMessage): boolean {
 	if (message.stopReason === "error" || message.stopReason === "aborted") return false;
 	const hasToolCall = message.content.some((part) => part.type === "toolCall");
@@ -9,6 +10,7 @@ export function isUserFacingDraft(message: AssistantMessage): boolean {
 	const text = contentText(message.content, "").trim();
 	if (!text) return false;
 	if (text.includes(DECISION_BLOCK_FENCE) || parseDecisionBlockFromText(text)) return false;
+	if (scrapePlainQuestionsFromText(text)) return false;
 	return true;
 }
 
