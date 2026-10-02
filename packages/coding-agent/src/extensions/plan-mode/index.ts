@@ -115,6 +115,8 @@ export function createPlanModeExtension(): ExtensionFactory {
 			planModeEnabled = !planModeEnabled;
 			executionMode = false;
 			todoItems = [];
+			// Persist before setActiveTools so _rebuildSystemPrompt sees plan mode on the branch.
+			persistState();
 
 			if (planModeEnabled) {
 				enablePlanModeTools();
@@ -124,7 +126,6 @@ export function createPlanModeExtension(): ExtensionFactory {
 				ctx.ui.notify("Plan mode disabled. Full access restored.");
 			}
 			updateStatus(ctx);
-			persistState();
 		}
 
 		pi.registerCommand("plan", {
@@ -309,6 +310,9 @@ After completing a step, include a [DONE:n] tag in your response.`;
 				markCompletedPlanSteps(messages.map(getTextContent).join("\n"), todoItems);
 			}
 
+			if (planModeEnabled && planModeEntry === undefined) {
+				persistState();
+			}
 			if (planModeEnabled) {
 				enablePlanModeTools();
 			}

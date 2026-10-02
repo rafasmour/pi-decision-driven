@@ -1,5 +1,5 @@
-import { contentText } from "@earendil-works/pi-ai";
 import type { ClassifierContext, ClassifierResult } from "@earendil-works/pi-ai";
+import { contentText } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { emptyGoalCard } from "../src/core/decision/goal-card.ts";
 import { goalCardWithPlanSteps } from "../src/core/decision/plan-approve.ts";
