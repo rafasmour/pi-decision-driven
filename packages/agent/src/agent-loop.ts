@@ -5,12 +5,15 @@
 
 import {
 	type AssistantMessage,
+	type ClassifierContext,
 	type ClassifierQuestion,
 	EventStream,
 	getCurrentTools,
 	getToolStateChanges,
 	type JsonObject,
 	normalizeContext,
+	type QuestionnaireQuestion,
+	questionsToClassifierContext,
 	type SystemMessage,
 	type ToolResultMessage,
 	type ToolStateChanges,
@@ -582,6 +585,61 @@ function isQuestionRecord(value: unknown): value is Record<string, ClassifierQue
 	return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length > 0;
 }
 
+function isQuestionnaireQuestion(value: unknown): value is QuestionnaireQuestion {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	if (typeof record.id !== "string" || typeof record.prompt !== "string") return false;
+	if (record.label !== undefined && typeof record.label !== "string") return false;
+	if (record.options === undefined) return true;
+	if (!Array.isArray(record.options)) return false;
+	return record.options.every((option) => {
+		if (typeof option !== "object" || option === null || Array.isArray(option)) return false;
+		const entry = option as Record<string, unknown>;
+		return (
+			typeof entry.value === "string" &&
+			typeof entry.label === "string" &&
+			(entry.description === undefined || typeof entry.description === "string")
+		);
+	});
+}
+
+function isQuestionnaireArray(value: unknown): value is QuestionnaireQuestion[] {
+	return Array.isArray(value) && value.length > 0 && value.every(isQuestionnaireQuestion);
+}
+
+/**
+ * Normalize `ask_decision` questions to the classifier record the loop and `classify` hook expect.
+ * Accepts either a questionnaire array or a legacy classifier question record.
+ */
+export function resolveDecisionClassifierContext(
+	rawQuestions: unknown,
+	rawState: unknown,
+	rawGoal?: unknown,
+): { context: ClassifierContext; questionsForEvents: Record<string, ClassifierQuestion> } | undefined {
+	if (rawState !== undefined && !isJsonObject(rawState)) return undefined;
+
+	if (isQuestionnaireArray(rawQuestions)) {
+		const batch = {
+			state: rawState as Record<string, unknown> | undefined,
+			questions: rawQuestions,
+		};
+		const context = questionsToClassifierContext(batch);
+		if (typeof rawGoal === "string" && rawGoal.length > 0) {
+			context.state = { ...context.state, goal: rawGoal };
+		}
+		return { context, questionsForEvents: context.questions };
+	}
+
+	if (isQuestionRecord(rawQuestions)) {
+		return {
+			context: { state: (rawState as JsonObject | undefined) ?? {}, questions: rawQuestions },
+			questionsForEvents: rawQuestions,
+		};
+	}
+
+	return undefined;
+}
+
 function isJsonObject(value: unknown): value is JsonObject {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -610,39 +668,43 @@ async function runDecision(
 
 	const rawQuestions: unknown = toolCall.arguments.questions;
 	const rawState: unknown = toolCall.arguments.state;
+	const rawGoal: unknown = toolCall.arguments.goal;
+	const resolved = resolveDecisionClassifierContext(rawQuestions, rawState, rawGoal);
 	let finalized: FinalizedToolCallOutcome;
 	let phase: DecisionPhase = "idle";
 	let appendedMessages: AgentMessage[] | undefined;
 	let terminate = false;
 
-	if (!isQuestionRecord(rawQuestions) || (rawState !== undefined && !isJsonObject(rawState))) {
+	if (!resolved) {
 		finalized = {
 			toolCall,
 			result: createErrorToolResult(
-				`Tool call "${DECISION_TOOL_NAME}" needs a non-empty "questions" object and, optionally, a "state" object.`,
+				`Tool call "${DECISION_TOOL_NAME}" needs a non-empty "questions" array or object and, optionally, "state" and "goal".`,
 			),
 			isError: true,
 		};
 	} else if (!config.classify) {
+		const { questionsForEvents } = resolved;
 		phase = "await_human";
 		terminate = true;
-		await emit({ type: "decision_start", phase, questions: rawQuestions });
-		await emit({ type: "decision_end", phase, questions: rawQuestions });
+		await emit({ type: "decision_start", phase, questions: questionsForEvents });
+		await emit({ type: "decision_end", phase, questions: questionsForEvents });
 		finalized = {
 			toolCall,
 			result: {
 				content: [{ type: "text", text: "Decision requires human input; no classifier is configured." }],
-				details: { phase, questions: rawQuestions },
+				details: { phase, questions: questionsForEvents },
 				terminate: true,
 			},
 			isError: false,
 		};
 	} else {
+		const { context, questionsForEvents } = resolved;
 		phase = "classify";
-		await emit({ type: "decision_start", phase, questions: rawQuestions });
+		await emit({ type: "decision_start", phase, questions: questionsForEvents });
 		let classified: Awaited<ReturnType<DecisionClassify>>;
 		try {
-			classified = await config.classify({ state: rawState ?? {}, questions: rawQuestions }, signal);
+			classified = await config.classify(context, signal);
 		} catch (error) {
 			classified = {
 				answers: {},
@@ -652,12 +714,12 @@ async function runDecision(
 		}
 
 		if (classified.stopReason === "stop") {
-			await emit({ type: "decision_end", phase, questions: rawQuestions, answers: classified.answers });
+			await emit({ type: "decision_end", phase, questions: questionsForEvents, answers: classified.answers });
 			finalized = {
 				toolCall,
 				result: {
 					content: [{ type: "text", text: JSON.stringify(classified.answers) }],
-					details: { phase, questions: rawQuestions, answers: classified.answers },
+					details: { phase, questions: questionsForEvents, answers: classified.answers },
 				},
 				isError: false,
 			};
@@ -666,7 +728,7 @@ async function runDecision(
 					(await config.interpretDecision?.(
 						{
 							message: assistantMessage,
-							questions: rawQuestions,
+							questions: questionsForEvents,
 							answers: classified.answers,
 							context: currentContext,
 						},
@@ -680,7 +742,7 @@ async function runDecision(
 				};
 			}
 		} else {
-			await emit({ type: "decision_end", phase, questions: rawQuestions });
+			await emit({ type: "decision_end", phase, questions: questionsForEvents });
 			finalized = {
 				toolCall,
 				result: createErrorToolResult(

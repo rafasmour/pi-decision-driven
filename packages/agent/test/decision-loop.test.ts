@@ -8,7 +8,7 @@ import {
 	type Model,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { agentLoop, createMessageCheckpoint, restoreMessagesToCheckpoint } from "../src/agent-loop.ts";
 import {
 	type AgentContext,
@@ -121,6 +121,32 @@ async function collect(
 }
 
 describe("decision-driven loop", () => {
+	it("accepts questionnaire-shaped ask_decision questions", async () => {
+		const classify = vi.fn(async () => ({ answers: fixedAnswers, stopReason: "stop" as const }));
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			classify,
+		};
+		const questionnaireArgs = jsonArguments({
+			questions: [{ id: "proceed", prompt: "Should we proceed?" }],
+		});
+		const { events } = await collect(
+			config,
+			{ messages: [], tools: [] },
+			scriptedStream(decisionCall("decision-q", questionnaireArgs)),
+		);
+		expect(classify).toHaveBeenCalledWith(
+			expect.objectContaining({
+				questions: expect.objectContaining({
+					proceed: expect.objectContaining({ type: "bool" }),
+				}),
+			}),
+			undefined,
+		);
+		expect(events.some((e) => e.type === "decision_end" && e.phase === "classify")).toBe(true);
+	});
+
 	it("classifies an ask_decision turn, emits decision events, and continues", async () => {
 		const classifyCalls: unknown[] = [];
 		const classify: DecisionClassify = async (context) => {

@@ -136,6 +136,10 @@ export interface Settings {
 	defaultModel?: string;
 	defaultClassifierProvider?: string;
 	defaultClassifierModel?: string;
+	/** When unset, decision-driven mode defaults on while a classifier model is configured. */
+	decisionDriven?: boolean;
+	/** Stub for Wave 2b quality gate retries. */
+	maxQualityRetries?: number;
 	defaultThinkingLevel?: ThinkingLevel;
 	modelThinkingLevels?: Record<string, ThinkingLevel>; // per-model default thinking level overrides keyed by "provider/modelId"
 	transport?: TransportSetting; // default: "auto"
@@ -843,6 +847,14 @@ export class SettingsManager {
 		this.markModified("defaultClassifierProvider");
 		this.markModified("defaultClassifierModel");
 		this.save();
+	}
+
+	getDecisionDriven(): boolean | undefined {
+		return this.settings.decisionDriven;
+	}
+
+	getMaxQualityRetries(): number | undefined {
+		return this.settings.maxQualityRetries;
 	}
 
 	getSteeringMode(): "all" | "one-at-a-time" {

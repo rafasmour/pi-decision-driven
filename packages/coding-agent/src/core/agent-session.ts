@@ -25,6 +25,8 @@ import {
 	type AgentState,
 	type AgentTool,
 	type AgentToolCallOutcome,
+	type AgentTurnContext,
+	type AgentTurnDecision,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
 	type PrepareNextTurnContext,
@@ -33,6 +35,8 @@ import {
 } from "@earendil-works/pi-agent-core";
 import {
 	type AnyModel,
+	type ClassifierContext,
+	type ClassifierResult,
 	contentText,
 	getCurrentSystemMessage,
 	isModelType,
@@ -84,6 +88,9 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
+import { buildDecisionTurnMessages } from "./decision/decision-follow-up.ts";
+import { parseDecisionBlockFromAssistant } from "./decision/parse-decision-block.ts";
+import { toClassifierContext } from "./decision/questionnaire.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -504,6 +511,99 @@ export class AgentSession {
 			includeAllExtensionTools: true,
 		});
 		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
+		this._syncDecisionDrivenMode();
+	}
+
+	private _isDecisionDrivenEnabled(): boolean {
+		if (this.settingsManager.getDecisionDriven() === false) return false;
+		return this.classifierModel !== undefined;
+	}
+
+	private _syncDecisionDrivenMode(): void {
+		this.agent.decisionDriven = undefined;
+		this.agent.classify = undefined;
+		this.agent.interpretDecision = undefined;
+		this.agent.decisionConfig = this._isDecisionDrivenEnabled()
+			? { maxQualityRetries: this.settingsManager.getMaxQualityRetries() ?? 0 }
+			: undefined;
+		this._rebuildSystemPrompt(this.getActiveToolNames());
+	}
+
+	private async _runDecisionClassify(
+		context: ClassifierContext,
+		signal?: AbortSignal,
+	): Promise<Pick<ClassifierResult, "answers" | "stopReason" | "errorMessage">> {
+		const model = this.classifierModel;
+		if (!model) {
+			return { answers: {}, stopReason: "error", errorMessage: "No classifier model configured" };
+		}
+		try {
+			const result = await this._modelRuntime.classify(model, context, { signal });
+			return {
+				answers: result.answers,
+				stopReason: result.stopReason,
+				errorMessage: result.errorMessage,
+			};
+		} catch (error) {
+			return {
+				answers: {},
+				stopReason: "error",
+				errorMessage: error instanceof Error ? error.message : String(error),
+			};
+		}
+	}
+
+	private _persistInjectedMessages(messages: AgentMessage[]): void {
+		for (const message of messages) {
+			if (message.role === "custom") {
+				this.sessionManager.appendCustomMessageEntry(
+					message.customType,
+					message.content,
+					message.display,
+					message.details,
+				);
+			} else if (
+				message.role === "system" ||
+				message.role === "user" ||
+				message.role === "assistant" ||
+				message.role === "toolResult"
+			) {
+				this.sessionManager.appendMessage(message);
+			}
+		}
+		this._refreshFinalizedContext();
+		for (const message of messages) {
+			this._emit({ type: "message_start", message });
+			this._emit({ type: "message_end", message });
+		}
+	}
+
+	private async _maybeClassifyParsedDecisions(
+		turn: AgentTurnContext,
+		signal?: AbortSignal,
+	): Promise<AgentTurnDecision | undefined> {
+		if (!this._isDecisionDrivenEnabled()) return undefined;
+		if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return undefined;
+		const toolCalls = turn.message.content.filter((part) => part.type === "toolCall");
+		if (toolCalls.length > 0 || turn.toolResults.length > 0) return undefined;
+
+		const batch = parseDecisionBlockFromAssistant(turn.message);
+		if (!batch) return undefined;
+
+		const classified = await this._runDecisionClassify(toClassifierContext(batch), signal);
+		if (classified.stopReason !== "stop") return undefined;
+
+		const followUp = await buildDecisionTurnMessages(batch, classified.answers, {
+			skills: this._resourceLoader.getSkills().skills,
+			modelRuntime: this._modelRuntime,
+			classifier: this.classifierModel,
+			signal,
+		});
+		this._persistInjectedMessages(followUp);
+		for (const message of followUp) {
+			turn.context.messages.push(message);
+		}
+		return { action: "continue" };
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -871,6 +971,8 @@ export class AgentSession {
 			const extensionContinue = await this._dispatchTurnEndBoundary(turn.message, turn.toolResults);
 			const previousDecision = await previousFinishTurn?.(turn, signal);
 			if (previousDecision?.action === "end") return previousDecision;
+			const classified = await this._maybeClassifyParsedDecisions(turn, signal);
+			if (classified) return classified;
 			if (extensionContinue || previousDecision?.action === "continue") return { action: "continue" };
 			return undefined;
 		};
@@ -1450,6 +1552,7 @@ export class AgentSession {
 		if (options.persist) {
 			this.settingsManager.setDefaultClassifierAndProvider(model.provider, model.id);
 		}
+		this._syncDecisionDrivenMode();
 	}
 
 	/** Current thinking level */
@@ -1703,6 +1806,7 @@ export class AgentSession {
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
+		const decisionDriven = this._isDecisionDrivenEnabled();
 		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({
 			cwd: this._cwd,
 			skills: loadedSkills,
@@ -1712,6 +1816,14 @@ export class AgentSession {
 			selectedTools: validToolNames,
 			toolSnippets,
 			toolGuidelines: Object.fromEntries(this._toolPromptGuidelines),
+			decisionDriven,
+			promptGuidelines: decisionDriven
+				? [
+						"Do not skip asking to implement, guess, or self-select an option — emit a ```decisions block and wait",
+						"No tools or code in the same turn as a decisions block",
+						"One decisions block per decision point until the harness authorizes the next phase",
+					]
+				: [],
 		});
 	}
 
