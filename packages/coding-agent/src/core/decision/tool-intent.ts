@@ -1,5 +1,5 @@
-import type { ClassifierAnswer } from "@earendil-works/pi-ai";
 import { DECISION_TOOL_NAME } from "@earendil-works/pi-agent-core";
+import type { ClassifierAnswer } from "@earendil-works/pi-ai";
 import type { AskDecisionArguments } from "./questionnaire.ts";
 
 /** Values that authorize a single tool family for the next LLM turn (D1 tool_args). */
@@ -25,10 +25,13 @@ export function normalizeIntentToken(value: string): string {
 	return value.trim().toLowerCase().replace(/\s+/g, "_");
 }
 
+/** Resolve a known tool-family alias only — product choice values must not become intents. */
 export function resolveToolIntentValue(raw: string): string | undefined {
-	const token = normalizeIntentToken(raw);
-	if (token === "respond") return "respond";
-	return TOOL_INTENT_ALIASES[token] ?? (token.length > 0 ? token : undefined);
+	return TOOL_INTENT_ALIASES[normalizeIntentToken(raw)];
+}
+
+function questionHasKnownToolOptions(question: AskDecisionArguments["questions"][number]): boolean {
+	return question.options?.some((option) => resolveToolIntentValue(option.value) !== undefined) ?? false;
 }
 
 export function detectToolIntentFromAnswers(
@@ -38,18 +41,10 @@ export function detectToolIntentFromAnswers(
 	for (const question of batch.questions) {
 		const answer = answers[question.id];
 		if (!answer || answer.type !== "choice") continue;
-		const isIntentQuestion =
-			INTENT_QUESTION_IDS.includes(question.id) ||
-			(question.options?.some((option) => resolveToolIntentValue(option.value) !== undefined) ?? false);
-		if (!isIntentQuestion && !question.options?.length) continue;
+		const isIntentQuestion = INTENT_QUESTION_IDS.includes(question.id) || questionHasKnownToolOptions(question);
+		if (!isIntentQuestion) continue;
 		const resolved = resolveToolIntentValue(answer.choice);
 		if (resolved) return resolved;
-	}
-	for (const question of batch.questions) {
-		const answer = answers[question.id];
-		if (answer?.type !== "choice") continue;
-		const resolved = resolveToolIntentValue(answer.choice);
-		if (resolved && resolved !== "respond") return resolved;
 	}
 	return undefined;
 }
@@ -57,15 +52,18 @@ export function detectToolIntentFromAnswers(
 /** Restrict active tools to the intent family; `respond` clears restriction. Always keeps ask_decision. */
 export function toolNamesForIntent(intent: string, activeToolNames: readonly string[]): string[] | undefined {
 	if (intent === "respond") return undefined;
-	const family = resolveToolIntentValue(intent) ?? intent;
-	if (family === "respond") return undefined;
+	const family = resolveToolIntentValue(intent);
+	if (!family || family === "respond") return undefined;
 	const allowed = new Set<string>([family, DECISION_TOOL_NAME]);
 	if (family === "bash") allowed.add("bash");
 	if (family === "read") {
 		allowed.add("read");
 		allowed.add("grep");
 	}
-	return activeToolNames.filter((name) => allowed.has(name));
+	const filtered = activeToolNames.filter((name) => allowed.has(name));
+	// No matching Act tools in the active set → treat as no intent (lift pre-auth).
+	if (!filtered.some((name) => name !== DECISION_TOOL_NAME)) return undefined;
+	return filtered;
 }
 
 export function intentSummaryFromAnswers(

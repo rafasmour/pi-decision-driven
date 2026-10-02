@@ -13,7 +13,19 @@
 
 ### Changed
 
+- Decision-driven Ask-first prompt: first tool call must be `ask_decision`; only call tools currently declared. System prompt tool list follows the pre-auth / intent restriction.
+- Built-in classifier defaults: OpenRouter `inception/mercury-decide:free` (also free: `respan/span-01-lite:free`), OpenCode `jev-1.13-free`, and per-provider entries in `defaultClassifierPerProvider`. Used when settings have no classifier default; `/login` to a provider with a classifier default saves it.
+- OpenRouter's default chat model is `openrouter/free`.
 - `/arminsayshi` now plays a 3D version in fullscreen mode, with one cube per pixel of Armin. The 3D pi logo easter egg on header logo click is replaced by it.
+
+### Fixed
+
+- Decision-driven tool intent only matches known tool-family aliases (`read`/`write`/`edit`/`bash`/`respond`), so product choice answers (`yes`/`no`) no longer lock tools to a nonsense set and hide `write`.
+- Successful classify with no tool-family intent now sets `respondAuthorized`, so `_syncDecisionDrivenMode` cannot re-apply pre-auth and Act tools stay available.
+- Quality gate: omit `on_goal` when GoalCard goal is empty; soften default goal criteria; reword deliver routing criteria; with `maxQualityRetries` 0, show the draft instead of escalating to a human confirm loop.
+- Agent loop declares tools after `prepareRequest`, so decision-driven pre-auth no longer advertises `write`/`edit` while rejecting them at execution ("Tool write not found").
+- `models.json` classifier-only providers (for example local Laya with `api: "typesafe-system-one"`) now get the built-in classify implementation instead of failing with "Provider … does not support classification".
+- After a successful classify with no tool-family intent, pre-auth tool lockdown is lifted so Act tools become available once answers are injected.
 
 ## [1.0.0] - 2026-10-01
 

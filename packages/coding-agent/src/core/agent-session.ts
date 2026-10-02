@@ -29,9 +29,9 @@ import {
 	type AgentTurnDecision,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	createMessageCheckpoint,
 	DECISION_TOOL_NAME,
 	type DecisionResultContext,
-	createMessageCheckpoint,
 	type PrepareNextTurnContext,
 	runToolCall,
 	type ThinkingLevel,
@@ -113,10 +113,10 @@ import {
 import { goalRefineClassifierContext, mergeRefinedGoalCard } from "./decision/goal-refine.ts";
 import { offPlanClassifierContext, parseOffPlanResult } from "./decision/off-plan.ts";
 import { parseDecisionBlockFromAssistant } from "./decision/parse-decision-block.ts";
-import { decisionPreAuthToolNames } from "./decision/pre-auth-tools.ts";
 import { isPlanModePlanning, loadPlanModeFromBranch } from "./decision/plan-mode-state.ts";
 import { resolvePlanModeDecisionTurn } from "./decision/plan-mode-turn.ts";
 import { planModeSystemSection } from "./decision/plan-routing.ts";
+import { decisionPreAuthToolNames } from "./decision/pre-auth-tools.ts";
 import {
 	applyQualityRouteWithRetries,
 	parseQualityGateResult,
@@ -600,13 +600,24 @@ export class AgentSession {
 			const preAuth = decisionPreAuthToolNames(this.getActiveToolNames());
 			this._decisionGates.restrictedToolNames = preAuth.length > 0 ? preAuth : [];
 		}
-		this._rebuildSystemPrompt(this.getActiveToolNames());
+		this._rebuildSystemPrompt(this._promptToolNames());
+	}
+
+	/** Tool names to list in the system prompt — matches the pre-auth / intent restriction when set. */
+	private _promptToolNames(): string[] {
+		const active = this.getActiveToolNames();
+		const restricted = this._decisionGates.restrictedToolNames;
+		if (this._isDecisionDrivenEnabled() && restricted && restricted.length > 0) {
+			const allowed = new Set(restricted);
+			return active.filter((name) => allowed.has(name));
+		}
+		return active;
 	}
 
 	private _ensureAskDecisionTool(enabled: boolean): void {
 		const hasTool = this._baseToolDefinitions.has(DECISION_TOOL_NAME);
 		if (enabled && !hasTool) {
-			this._baseToolDefinitions.set(DECISION_TOOL_NAME, createAskDecisionToolDefinition());
+			this._baseToolDefinitions.set(DECISION_TOOL_NAME, createAskDecisionToolDefinition() as ToolDefinition);
 			this._refreshToolRegistry({
 				activeToolNames: [...this.getActiveToolNames(), DECISION_TOOL_NAME],
 			});
@@ -860,8 +871,17 @@ export class AgentSession {
 			if (restricted && restricted.length > 0) {
 				this._decisionGates.restrictedToolNames = restricted;
 				this._decisionGates.respondAuthorized = false;
+			} else {
+				// Intent family matches no Act tools (or respond) — lift pre-auth.
+				this._decisionGates.respondAuthorized = true;
+				this._decisionGates.restrictedToolNames = undefined;
 			}
 		} else if (intent === "respond") {
+			this._decisionGates.respondAuthorized = true;
+			this._decisionGates.restrictedToolNames = undefined;
+		} else {
+			// First successful classify with no tool-family intent lifts pre-auth so Act tools work.
+			// Set respondAuthorized so later _syncDecisionDrivenMode cannot re-apply pre-auth.
 			this._decisionGates.respondAuthorized = true;
 			this._decisionGates.restrictedToolNames = undefined;
 		}
@@ -870,6 +890,7 @@ export class AgentSession {
 			this._goalCard = appendGoalCardRecent(this._goalCard, intentSummaryFromAnswers(batch, answers, intent));
 			persistGoalCard(this.sessionManager, this._goalCard);
 		}
+		this._rebuildSystemPrompt(this._promptToolNames());
 		return { blocked: false };
 	}
 
@@ -919,9 +940,10 @@ export class AgentSession {
 
 		const goalCard = this._goalCard ?? emptyGoalCard();
 		const draft = draftTextFromAssistant(turn.message);
+		const hasGoal = goalCard.goal.trim().length > 0;
 		const gateContext = qualityGateClassifierContext(goalCard, draft);
 		const classified = await this._runDecisionClassify(gateContext, signal);
-		const parsed = parseQualityGateResult(classified);
+		const parsed = parseQualityGateResult(classified, { hasGoal });
 		const maxRetries = this.agent.decisionConfig?.maxQualityRetries ?? 0;
 		const route = applyQualityRouteWithRetries(parsed, this._decisionGates.qualityRetriesUsed, maxRetries);
 
@@ -1435,7 +1457,7 @@ export class AgentSession {
 			const runOptions = this._runSystemPromptOptions ?? this._baseSystemPromptOptions;
 			const options = normalizeBuildSystemPromptOptions({
 				...runOptions,
-				selectedTools: this.getActiveToolNames(),
+				selectedTools: this._promptToolNames(),
 				toolSnippets: { ...this._baseSystemPromptOptions.toolSnippets, ...runOptions.toolSnippets },
 				toolGuidelines: { ...this._baseSystemPromptOptions.toolGuidelines, ...runOptions.toolGuidelines },
 			});
@@ -1628,9 +1650,7 @@ export class AgentSession {
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
 		if (event.type === "tool_execution_start" && event.toolName === DECISION_TOOL_NAME) {
-			this._pendingAskDecisionBatch = parseAskDecisionArguments(
-				(event.args ?? {}) as Record<string, unknown>,
-			);
+			this._pendingAskDecisionBatch = parseAskDecisionArguments((event.args ?? {}) as Record<string, unknown>);
 			this._pendingInterpretMessages = undefined;
 		}
 		// Record the calls a tool made through ctx.executeTool() and their usage on its result message.
@@ -1975,8 +1995,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Decision model for this session: the one picked with `/classifier`, otherwise the saved
-	 * `defaultClassifierProvider`/`defaultClassifierModel`, if it still resolves to a classifier model.
+	 * Decision model for this session: the one picked with `/classifier`, otherwise
+	 * `defaultClassifierProvider`/`defaultClassifierModel` (built-in OpenRouter free when unset).
 	 */
 	get classifierModel(): ModelTypeMap["classifier"] | undefined {
 		if (this._classifierModel) return this._classifierModel;
@@ -2275,9 +2295,9 @@ export class AgentSession {
 			sections,
 			promptGuidelines: decisionDriven
 				? [
-						"Exactly two modes: Ask (ask_decision tool) or Act (other tools)",
-						"Do not put decisions in prose JSON or markdown fences — call ask_decision",
-						"Do not skip asking to implement or guess — ask_decision and wait for harness answers",
+						"First tool call on a new task must be ask_decision",
+						"Only call tools listed in the current tools section / request declarations",
+						"Do not call write/edit/bash until they appear after classifier answers",
 					]
 				: [],
 		});

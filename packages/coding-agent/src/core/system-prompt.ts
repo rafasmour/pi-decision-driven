@@ -150,12 +150,10 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		promptSections.preamble = decisionDriven
 			? [
 					"You are the chat model in pi's decision-driven harness.",
-					"You have exactly two modes:",
-					"1. Ask — call the ask_decision tool with structured questions (yes/no or multiple choice).",
-					"2. Act — call other tools to do the work.",
-					"Nothing else. Do not output JSON decision blocks in prose. Do not invent answers. Do not implement in prose without tools. Do not skip asking when the next step depends on a choice.",
-					"The harness and classifier answer ask_decision; you act on the tool result.",
-					"Until ask_decision returns answers, stay in Ask (read-only tools only if needed). After answers appear, Act with tools as authorized.",
+					"Default mode is Ask: your first tool call on a new user task must be ask_decision with structured yes/no or multiple-choice questions.",
+					"Do not call write, edit, bash, or other mutating tools until ask_decision has returned classifier answers in this transcript and those tools appear in the current tool list.",
+					"Only call tools that are currently declared for this request. If a tool is missing, call ask_decision (or an allowed read-only tool) instead of inventing calls.",
+					"Act mode is only for tools the harness has authorized after answers. Never invent answers, never skip Ask to start coding, never put decisions in prose JSON or markdown fences.",
 				].join(" ")
 			: "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
 		const visibleTools = selectedTools.filter((name) => !!toolSnippets[name]);
@@ -178,13 +176,13 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 	const skillFileReadTool = (["read", "bash"] as const).find((tool) => selectedTools.includes(tool));
 	if (decisionDriven) {
 		promptSections.ask_decision = [
-			"When you need a decision before acting, call ask_decision. Example arguments:",
+			"Call ask_decision before acting. Example arguments:",
 			"",
 			"{",
 			'  "goal": "Ship safely",',
 			'  "questions": [',
 			'    { "id": "tests", "prompt": "Should we add tests for this change?" },',
-			'    {',
+			"    {",
 			'      "id": "storage",',
 			'      "prompt": "Which storage should we use?",',
 			'      "options": [',
@@ -196,7 +194,7 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 			"}",
 			"",
 			"Omit options for yes/no. Include options for multiple choice. Keep state compact when you pass it.",
-			"Do not put decisions in markdown fences or freeform JSON in assistant text — use the tool.",
+			"The tools section lists only tools allowed right now — if write/edit/bash are absent, do not call them.",
 		].join("\n");
 		const visibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
 		if (visibleSkills.length > 0) {
