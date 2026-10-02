@@ -111,6 +111,9 @@ import {
 import { goalRefineClassifierContext, mergeRefinedGoalCard } from "./decision/goal-refine.ts";
 import { offPlanClassifierContext, parseOffPlanResult } from "./decision/off-plan.ts";
 import { parseDecisionBlockFromAssistant } from "./decision/parse-decision-block.ts";
+import { isPlanModePlanning, loadPlanModeFromBranch } from "./decision/plan-mode-state.ts";
+import { resolvePlanModeDecisionTurn } from "./decision/plan-mode-turn.ts";
+import { planModeSystemSection } from "./decision/plan-routing.ts";
 import {
 	applyQualityRouteWithRetries,
 	parseQualityGateResult,
@@ -631,6 +634,26 @@ export class AgentSession {
 		const batch = parseDecisionBlockFromAssistant(turn.message);
 		if (!batch) return undefined;
 
+		const planState = loadPlanModeFromBranch(this.sessionManager.getBranch());
+		if (isPlanModePlanning(planState)) {
+			const goalCard = this._goalCard ?? emptyGoalCard();
+			const planTurn = await resolvePlanModeDecisionTurn(batch, {
+				goalCard,
+				hooks: { classify: (context, classifySignal) => this._runDecisionClassify(context, classifySignal) },
+				ui: this._extensionUIContext,
+				mode: this._extensionMode,
+				skills: this._resourceLoader.getSkills().skills,
+				modelRuntime: this._modelRuntime,
+				signal,
+			});
+			if (planTurn.status === "blocked") return { action: "end" };
+			this._persistInjectedMessages(planTurn.messages);
+			for (const message of planTurn.messages) {
+				turn.context.messages.push(message);
+			}
+			return { action: "continue" };
+		}
+
 		const classified = await this._runDecisionClassify(toClassifierContext(batch), signal);
 		if (classified.stopReason !== "stop") return undefined;
 
@@ -674,6 +697,9 @@ export class AgentSession {
 		answers: Record<string, ClassifierResult["answers"][string]>,
 		signal?: AbortSignal,
 	): Promise<{ blocked: boolean }> {
+		if (isPlanModePlanning(loadPlanModeFromBranch(this.sessionManager.getBranch()))) {
+			return { blocked: false };
+		}
 		const classifierContext = toClassifierContext(batch);
 		const threshold = this.agent.decisionConfig?.confidenceThreshold ?? 0.65;
 		const lowConfidence = findLowConfidenceAnswers(classifierContext.questions, answers, threshold);
@@ -751,6 +777,7 @@ export class AgentSession {
 		signal?: AbortSignal,
 	): Promise<AgentTurnDecision | undefined> {
 		if (!this._isDecisionDrivenEnabled()) return undefined;
+		if (isPlanModePlanning(loadPlanModeFromBranch(this.sessionManager.getBranch()))) return undefined;
 		if (!isUserFacingDraft(turn.message)) return undefined;
 		if (!this._decisionGates.respondAuthorized && this._decisionGates.restrictedToolNames) return undefined;
 
@@ -2084,6 +2111,11 @@ export class AgentSession {
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
 		const decisionDriven = this._isDecisionDrivenEnabled();
+		const planState = loadPlanModeFromBranch(this.sessionManager.getBranch());
+		const sections: Record<string, string> = {};
+		if (isPlanModePlanning(planState)) {
+			sections.plan_mode = planModeSystemSection(decisionDriven);
+		}
 		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({
 			cwd: this._cwd,
 			skills: loadedSkills,
@@ -2094,6 +2126,7 @@ export class AgentSession {
 			toolSnippets,
 			toolGuidelines: Object.fromEntries(this._toolPromptGuidelines),
 			decisionDriven,
+			sections,
 			promptGuidelines: decisionDriven
 				? [
 						"Do not skip asking to implement, guess, or self-select an option — emit a ```decisions block and wait",
