@@ -187,12 +187,16 @@ const ProviderCompatSchema = Type.Union([
 
 const ModelDefinitionSchema = Type.Object({
 	id: Type.String({ minLength: 1 }),
+	type: Type.Optional(
+		Type.Union([Type.Literal("chat"), Type.Literal("image"), Type.Literal("classifier")]),
+	),
 	name: Type.Optional(Type.String({ minLength: 1 })),
 	api: Type.Optional(Type.String({ minLength: 1 })),
 	baseUrl: Type.Optional(Type.String({ minLength: 1 })),
 	reasoning: Type.Optional(Type.Boolean()),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
+	output: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
 	inputLimits: Type.Optional(ModelInputLimitsSchema),
 	cost: Type.Optional(ModelCostSchema),
 	promptCache: Type.Optional(ModelPromptCacheSchema),

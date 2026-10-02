@@ -114,6 +114,30 @@ Classifier models do not chat. They answer typed questions about JSON state: pic
 
 Chat models on a [llama.cpp router](llama-cpp.md#classification) are also listed as classifier models.
 
+Declare a custom classifier in agent-dir `models.json` with `"type": "classifier"` (same shape as extension classifier entries: `id`, `api`, `contextWindow`, optional `name` and `cost`). It appears in `/classifier` but not in `/model`:
+
+```json
+{
+  "providers": {
+    "my-proxy": {
+      "baseUrl": "https://decisions.example/v1",
+      "apiKey": "secret",
+      "models": [
+        {
+          "type": "classifier",
+          "id": "routing-v1",
+          "name": "Routing classifier",
+          "api": "typesafe-system-one",
+          "contextWindow": 8192
+        }
+      ]
+    }
+  }
+}
+```
+
+Use a classifier `api` Pi already supports (`typesafe-system-one`, `llama-cpp-classify`, or another registered classifier API).
+
 ### Select a classifier model
 
 Classifier models do not appear in `/model`, which stays chat-only. Use `/classifier` to browse them instead. It opens a selector like `/model`, listing only classifier models whose provider has working credentials. Type to filter, press Enter to use a model for this session, or press Ctrl+S to also save it as the default.
