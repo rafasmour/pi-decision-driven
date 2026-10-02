@@ -1,5 +1,7 @@
 # Contributing to pi
 
+This repository is [Decision-Driven](https://github.com/rafasmour/pi-decision-driven), a fork of [earendil-works/pi](https://github.com/earendil-works/pi) focused on classifier-driven decisions in the agent loop. Contribution rules below follow upstream Pi; fork-specific docs live in [docs/decision-driven.md](docs/decision-driven.md).
+
 This guide exists to save both sides time.
 
 ## Philosophy
