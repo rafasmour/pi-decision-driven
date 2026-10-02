@@ -14,6 +14,7 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_CLASSIFIER_PROVIDER } from "./model-resolver.ts";
 
 export interface CompactionModelOverride {
 	reserveTokens?: number;
@@ -838,11 +839,11 @@ export class SettingsManager {
 	}
 
 	getDefaultClassifierProvider(): string | undefined {
-		return this.settings.defaultClassifierProvider;
+		return this.settings.defaultClassifierProvider ?? DEFAULT_CLASSIFIER_PROVIDER;
 	}
 
 	getDefaultClassifierModel(): string | undefined {
-		return this.settings.defaultClassifierModel;
+		return this.settings.defaultClassifierModel ?? DEFAULT_CLASSIFIER_MODEL;
 	}
 
 	setDefaultClassifierAndProvider(provider: string, modelId: string): void {

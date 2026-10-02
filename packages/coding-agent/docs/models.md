@@ -148,7 +148,11 @@ Classifier models do not appear in `/model`, which stays chat-only. Use `/classi
 /classifier jev                  open the selector filtered by "jev"
 ```
 
-The session classifier is the decision model that decision-driven features use. Saving it with Ctrl+S writes `defaultClassifierProvider` and `defaultClassifierModel` to the global [settings](settings.md#model-and-thinking); new sessions start with that model. If no classifier is available, `/classifier` says so. Set `TYPESAFE_API_KEY`, sign in with `/login`, or load a classifier on a llama.cpp router with `/llama`.
+The session classifier is the decision model that decision-driven features use. Saving it with Ctrl+S writes `defaultClassifierProvider` and `defaultClassifierModel` to the global [settings](settings.md#model-and-thinking); new sessions start with that model.
+
+When those settings are unset, pi uses OpenRouter `inception/mercury-decide:free` (see `DEFAULT_CLASSIFIER_*` / `defaultClassifierPerProvider`). Logging into a provider that has a classifier default also saves it if none was stored yet.
+
+If no classifier is available, `/classifier` says so. Set `OPENROUTER_API_KEY` (or another classifier provider key), sign in with `/login`, or load a classifier on a llama.cpp router with `/llama`.
 
 ### Call classifier models from scripts
 

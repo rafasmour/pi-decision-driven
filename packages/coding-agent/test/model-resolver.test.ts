@@ -9,6 +9,9 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import {
+	DEFAULT_CLASSIFIER_MODEL,
+	DEFAULT_CLASSIFIER_PROVIDER,
+	defaultClassifierPerProvider,
 	defaultModelPerProvider,
 	findInitialModel,
 	parseModelPattern,
@@ -709,6 +712,19 @@ describe("default model selection", () => {
 	test("openai defaults track current models", () => {
 		expect(defaultModelPerProvider.openai).toBe("gpt-5.5");
 		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-6.1-sol");
+	});
+
+	test("openrouter defaults to the free router model", () => {
+		expect(defaultModelPerProvider.openrouter).toBe("openrouter/free");
+	});
+
+	test("classifier defaults prefer free OpenRouter and OpenCode models", () => {
+		expect(DEFAULT_CLASSIFIER_PROVIDER).toBe("openrouter");
+		expect(DEFAULT_CLASSIFIER_MODEL).toBe("inception/mercury-decide:free");
+		expect(defaultClassifierPerProvider.openrouter).toBe("inception/mercury-decide:free");
+		expect(defaultClassifierPerProvider.opencode).toBe("jev-1.13-free");
+		expect(defaultClassifierPerProvider.typesafe).toBe("jev-latest");
+		expect(defaultClassifierPerProvider["vercel-ai-gateway"]).toBe("convaiinnovations/laya-free");
 	});
 
 	test("zai, minimax, cerebras, and ant-ling defaults track current models", () => {
