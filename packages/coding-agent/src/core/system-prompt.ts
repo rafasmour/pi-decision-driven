@@ -4,6 +4,7 @@
 
 import { getSystemMessageText } from "@earendil-works/pi-ai";
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
+import type { DecisionSessionPhase } from "./decision/decision-session-phase.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 
 export interface BuildSystemPromptOptions {
@@ -31,6 +32,10 @@ export interface BuildSystemPromptOptions {
 	skills?: Skill[];
 	/** Decision-driven mode: plain-text questions + tools only; S4 skill index behavior. */
 	decisionDriven?: boolean;
+	/**
+	 * Current harness phase. Drives `<decision_loop>` copy for ask/nudge/act/verify.
+	 */
+	decisionSessionPhase?: DecisionSessionPhase;
 }
 
 export type NormalizedBuildSystemPromptOptions = BuildSystemPromptOptions & {
@@ -69,6 +74,7 @@ export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOption
 		contextFiles: (input.contextFiles ?? []).map((file) => ({ ...file })),
 		skills: (input.skills ?? []).map((skill) => ({ ...skill })),
 		decisionDriven: input.decisionDriven ?? false,
+		decisionSessionPhase: input.decisionSessionPhase,
 	};
 }
 
@@ -135,6 +141,7 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		contextFiles,
 		skills,
 		decisionDriven,
+		decisionSessionPhase,
 	} = options;
 
 	for (const name of Object.keys(customSections)) {
@@ -150,10 +157,13 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		promptSections.preamble = decisionDriven
 			? [
 					"You are the chat model in pi's decision-driven harness.",
-					"Default mode is Ask: your first tool call on a new user task must be ask_decision with structured yes/no or multiple-choice questions.",
-					"Do not call write, edit, bash, or other mutating tools until ask_decision has returned classifier answers in this transcript and those tools appear in the current tool list.",
-					"Only call tools that are currently declared for this request. If a tool is missing, call ask_decision (or an allowed read-only tool) instead of inventing calls.",
-					"Act mode is only for tools the harness has authorized after answers. Never invent answers, never skip Ask to start coding, never put decisions in prose JSON or markdown fences.",
+					"Do not take decisions in your thought process or reasoning — never pick options, policies, designs, or next steps there.",
+					"In thinking, only describe the situation (facts, uncertainty, what is unknown). Then call ask_decision so the decision model chooses.",
+					"You do not decide product choices, policy, or next implementation steps yourself — always pose them via ask_decision.",
+					"Default mode is Ask: your only allowed tool until Act unlock is ask_decision.",
+					"Do not call read, write, edit, bash, grep, find, ls, or any other tool until ask_decision has returned answers that authorize Act tools and those tools appear in the current tool list.",
+					"Never invent classifier answers, never skip Ask to start coding or exploring, never put decisions in prose JSON or markdown fences when ask_decision is available.",
+					"Act mode begins only after the harness unlocks tools from classified (or human-routed) answers.",
 				].join(" ")
 			: "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
 		const visibleTools = selectedTools.filter((name) => !!toolSnippets[name]);
@@ -175,16 +185,57 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 	if (contextFiles.length > 0) promptSections.project_context = renderProjectContext(contextFiles);
 	const skillFileReadTool = (["read", "bash"] as const).find((tool) => selectedTools.includes(tool));
 	if (decisionDriven) {
+		if (decisionSessionPhase === "ask") {
+			promptSections.decision_loop = [
+				"Phase: ask. Act tools are not authorized.",
+				"Do not decide in thinking — only frame the situation, then call ask_decision.",
+				"ask_decision is the only tool you may call (no text-only replies).",
+			].join(" ");
+		} else if (decisionSessionPhase === "nudge") {
+			promptSections.decision_loop = [
+				"Phase: nudge. Goal is unclear.",
+				"Call ask_decision proposing a final goal and ask id goal_clear: whether that goal is clear enough to act.",
+				"If unclear, Ask phase resumes; if clear, enter Act with a checkbox task list.",
+			].join(" ");
+		} else if (decisionSessionPhase === "verify") {
+			promptSections.decision_loop = [
+				"Phase: verify. Call ask_decision with one self-contained yes/no:",
+				'"Should we continue fixing / repeat before finishing?" (yes = keep fixing, no = settle).',
+				"Include goal, brief steps executed, and honest failures in the question prompt.",
+			].join(" ");
+		} else if (decisionSessionPhase === "act") {
+			promptSections.decision_loop = [
+				"Phase: act. You may use Act tools freely; ask_decision is optional for mid-task choices.",
+				"On first Act entry, output a markdown checkbox task list (- [ ] …) of the work before other tools.",
+				"When finished, stop — the harness will force verify.",
+			].join(" ");
+		}
 		promptSections.ask_decision = [
-			"Call ask_decision before acting. Example arguments:",
+			"Always use ask_decision for choices — do not reason product/policy decisions in assistant prose, thinking, or act without answers.",
+			"In your thought process: describe the situation only; never conclude what to do — ask_decision decides.",
+			"In ask/verify phases, ask_decision is the only tool. In act, ask_decision is optional.",
+			"",
+			"Question rules:",
+			"- One concern per question.",
+			"- Each prompt must be a complete, self-contained problem: include paths, alternatives, and facts needed to answer.",
+			'- The classifier sees harness state only (goal_card, user_request, recent_tools) — not the full transcript. Never assume "as above", prior Q&A, or tool stdout.',
+			"- Options: omit for yes/no; for multiple choice provide at least two options. Never a single option.",
+			"",
+			"Answer routing (harness-owned, not your job to pick):",
+			"- In build mode, the harness classifies whether each question is answered by the decision classifier (jev) or shown to the human.",
+			"- Human questionnaire is only for preference/policy/priority/approval questions the router assigns to human — it is not the default ask path.",
+			"- After plan mode ends, do not behave as if every question is a human questionnaire; most build questions go to jev unless routed to human.",
+			"- In plan mode, the same jev-vs-human routing applies to planning questions.",
+			"",
+			"Example arguments:",
 			"",
 			"{",
 			'  "goal": "Ship safely",',
 			'  "questions": [',
-			'    { "id": "tests", "prompt": "Should we add tests for this change?" },',
+			'    { "id": "tests", "prompt": "Should we add unit tests for the login change in src/auth.ts before merging?" },',
 			"    {",
 			'      "id": "storage",',
-			'      "prompt": "Which storage should we use?",',
+			'      "prompt": "Which database should store session tokens for the login change?",',
 			'      "options": [',
 			'        { "value": "pg", "label": "Postgres" },',
 			'        { "value": "sqlite", "label": "SQLite" }',
@@ -193,8 +244,8 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 			"  ]",
 			"}",
 			"",
-			"Omit options for yes/no. Include options for multiple choice. Keep state compact when you pass it.",
-			"The tools section lists only tools allowed right now — if write/edit/bash are absent, do not call them.",
+			"Keep state compact: optional verified facts only. Do not dump transcripts or tool stdout.",
+			"The tools section lists only tools allowed right now — if write/edit/bash/read are absent, do not call them; call ask_decision instead.",
 		].join("\n");
 		const visibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
 		if (visibleSkills.length > 0) {

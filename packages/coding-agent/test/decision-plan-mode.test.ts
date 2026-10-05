@@ -1,10 +1,12 @@
 import type { ClassifierContext, ClassifierResult } from "@earendil-works/pi-ai";
 import { contentText } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import { resolveAnswererRoutedBatch } from "../src/core/decision/answerer-routed-turn.ts";
 import { emptyGoalCard } from "../src/core/decision/goal-card.ts";
 import { goalCardWithPlanSteps } from "../src/core/decision/plan-approve.ts";
 import { resolvePlanModeDecisionTurn } from "../src/core/decision/plan-mode-turn.ts";
 import {
+	answererRoutingContext,
 	parseAnswererRouting,
 	planAnswererRoutingContext,
 	READY_TO_DRAFT_PLAN_ID,
@@ -37,6 +39,106 @@ describe("plan answerer routing", () => {
 		});
 		expect(routing.get("stack")).toBe("jev");
 		expect(routing.get("scope")).toBe("human");
+	});
+});
+
+describe("build answerer routing", () => {
+	it("prefers jev wording for implementation questions", () => {
+		const context = answererRoutingContext(
+			{
+				goal: "Fix login",
+				questions: [{ id: "db", prompt: "Which database stores sessions?" }],
+			},
+			emptyGoalCard(),
+			{ phase: "build" },
+		);
+		expect(context.questions.db__answerer?.type).toBe("choice");
+		expect(context.questions.db__answerer?.instructions).toContain("implementation question");
+		const answerer = context.questions.db__answerer;
+		expect(answerer?.type).toBe("choice");
+		if (answerer?.type === "choice") {
+			expect(answerer.criteria.jev).toContain("prefer jev");
+		}
+		expect(context.state.goal).toBe("Fix login");
+	});
+
+	it("routes jev and human subsets then merges answers", async () => {
+		const classify = vi.fn(
+			async (
+				context: ClassifierContext,
+			): Promise<Pick<ClassifierResult, "answers" | "stopReason" | "errorMessage">> => {
+				if ("db__answerer" in context.questions) {
+					return {
+						stopReason: "stop",
+						answers: {
+							db__answerer: {
+								type: "choice",
+								choice: "jev",
+								confidence: 0.9,
+								probabilities: { jev: 0.9 },
+							},
+							theme__answerer: {
+								type: "choice",
+								choice: "human",
+								confidence: 0.9,
+								probabilities: { human: 0.9 },
+							},
+						},
+					};
+				}
+				if ("db" in context.questions) {
+					return {
+						stopReason: "stop",
+						answers: {
+							db: { type: "choice", choice: "pg", confidence: 0.8, probabilities: { pg: 0.8 } },
+						},
+					};
+				}
+				return { stopReason: "error", answers: {}, errorMessage: "unexpected" };
+			},
+		);
+
+		const ui = {
+			select: vi.fn(async () => "Dark"),
+		};
+
+		const batch: AskDecisionArguments = {
+			questions: [
+				{
+					id: "db",
+					prompt: "Which database?",
+					options: [
+						{ value: "pg", label: "Postgres" },
+						{ value: "sqlite", label: "SQLite" },
+					],
+				},
+				{
+					id: "theme",
+					prompt: "Preferred UI theme?",
+					options: [
+						{ value: "dark", label: "Dark" },
+						{ value: "light", label: "Light" },
+					],
+				},
+			],
+		};
+
+		const result = await resolveAnswererRoutedBatch(batch, {
+			goalCard: emptyGoalCard(),
+			phase: "build",
+			hooks: { classify },
+			ui: ui as never,
+			mode: "tui",
+		});
+
+		expect(result.status).toBe("continue");
+		if (result.status !== "continue") return;
+		expect(result.routing.get("db")).toBe("jev");
+		expect(result.routing.get("theme")).toBe("human");
+		expect(result.answers.db).toEqual(expect.objectContaining({ type: "choice", choice: "pg" }));
+		expect(result.answers.theme).toEqual(expect.objectContaining({ type: "choice", choice: "dark" }));
+		expect(classify).toHaveBeenCalledTimes(2);
+		expect(ui.select).toHaveBeenCalled();
 	});
 });
 

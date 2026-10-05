@@ -2,7 +2,8 @@ import type { ClassifierAnswer } from "@earendil-works/pi-ai";
 import type { ExtensionMode, ExtensionUIContext } from "../extensions/types.ts";
 import { type AskDecisionArguments, decisionKindForQuestion } from "./questionnaire.ts";
 
-export async function collectHumanPlanAnswers(
+/** Collect TUI answers for questions the answerer router assigned to human. */
+export async function collectHumanDecisionAnswers(
 	batch: AskDecisionArguments,
 	questionIds: string[],
 	ui: ExtensionUIContext | undefined,
@@ -37,3 +38,6 @@ export async function collectHumanPlanAnswers(
 	}
 	return answers;
 }
+
+/** @deprecated Prefer collectHumanDecisionAnswers. */
+export const collectHumanPlanAnswers = collectHumanDecisionAnswers;

@@ -5,46 +5,96 @@ import { type AskDecisionArguments, decisionKindForQuestion, toClassifierContext
 
 export const READY_TO_DRAFT_PLAN_ID = "ready_to_draft_plan";
 
-export type PlanAnswerer = "jev" | "human";
+/** Who answers an ask_decision question after the harness routes it. */
+export type DecisionAnswerer = "jev" | "human";
+
+/** @deprecated Prefer DecisionAnswerer — same values. */
+export type PlanAnswerer = DecisionAnswerer;
+
+export type AnswererRoutingPhase = "plan" | "build";
 
 export function answererRoutingQuestionId(questionId: string): string {
 	return `${questionId}__answerer`;
 }
 
-export function planAnswererRoutingContext(
+function routingCriteria(phase: AnswererRoutingPhase): { jev: string; human: string } {
+	if (phase === "build") {
+		return {
+			jev: "Answerable from repository facts, docs, harness state, or standard engineering tradeoffs — prefer jev",
+			human: "Requires the user's personal preference, product policy, priority, or explicit approval — not a technical default",
+		};
+	}
+	return {
+		jev: "Answerable from repository facts, docs, or standard engineering tradeoffs",
+		human: "Requires user preference, product policy, priority, or approval",
+	};
+}
+
+function routingInstructions(phase: AnswererRoutingPhase, prompt: string): string {
+	if (phase === "build") {
+		return `Who should answer this implementation question? Prefer jev unless it needs user preference or policy. ${prompt}`;
+	}
+	return `Who should answer this planning question? ${prompt}`;
+}
+
+/**
+ * Per-question jev-vs-human routing classify context for plan or build ask_decision batches.
+ * Skips `ready_to_draft_plan` and any ids in `skipQuestionIds`.
+ */
+export function answererRoutingContext(
 	batch: AskDecisionArguments,
 	goalCard: GoalCard | undefined,
+	options?: {
+		phase?: AnswererRoutingPhase;
+		skipQuestionIds?: ReadonlySet<string>;
+	},
 ): ClassifierContext {
+	const phase = options?.phase ?? "plan";
+	const skip = options?.skipQuestionIds;
+	const criteria = routingCriteria(phase);
 	const questions: Record<string, ClassifierQuestion> = {};
 	for (const question of batch.questions) {
 		if (question.id === READY_TO_DRAFT_PLAN_ID) continue;
+		if (skip?.has(question.id)) continue;
 		questions[answererRoutingQuestionId(question.id)] = {
 			type: "choice",
-			instructions: `Who should answer this planning question? ${question.prompt}`,
-			criteria: {
-				jev: "Answerable from repository facts, docs, or standard engineering tradeoffs",
-				human: "Requires user preference, product policy, priority, or approval",
-			},
+			instructions: routingInstructions(phase, question.prompt),
+			criteria,
 		};
 	}
 	const state: JsonObject = {};
 	if (goalCard) state.goal_card = goalCardClassifierState(goalCard);
-	if (batch.goal?.trim()) state.planning_goal = batch.goal.trim();
+	if (batch.goal?.trim()) {
+		if (phase === "plan") state.planning_goal = batch.goal.trim();
+		else state.goal = batch.goal.trim();
+	}
 	return { state, questions };
+}
+
+/** Plan-mode wrapper — same as `answererRoutingContext(..., { phase: "plan" })`. */
+export function planAnswererRoutingContext(
+	batch: AskDecisionArguments,
+	goalCard: GoalCard | undefined,
+): ClassifierContext {
+	return answererRoutingContext(batch, goalCard, { phase: "plan" });
 }
 
 export function parseAnswererRouting(
 	batch: AskDecisionArguments,
 	answers: Record<string, ClassifierAnswer>,
-): Map<string, PlanAnswerer> {
-	const routing = new Map<string, PlanAnswerer>();
+	options?: { skipQuestionIds?: ReadonlySet<string> },
+): Map<string, DecisionAnswerer> {
+	const skip = options?.skipQuestionIds;
+	const routing = new Map<string, DecisionAnswerer>();
 	for (const question of batch.questions) {
 		if (question.id === READY_TO_DRAFT_PLAN_ID) continue;
+		if (skip?.has(question.id)) continue;
 		const key = answererRoutingQuestionId(question.id);
 		const answer = answers[key];
 		if (answer?.type === "choice" && (answer.choice === "jev" || answer.choice === "human")) {
 			routing.set(question.id, answer.choice);
 		} else {
+			// Fail closed to human so preference/policy questions are not answered by the classifier by accident.
 			routing.set(question.id, "human");
 		}
 	}
@@ -108,11 +158,11 @@ export function mergeClassifierAnswers(
 	return merged;
 }
 
-export function questionIdsForAnswerer(routing: Map<string, PlanAnswerer>, answerer: PlanAnswerer): string[] {
+export function questionIdsForAnswerer(routing: Map<string, DecisionAnswerer>, answerer: DecisionAnswerer): string[] {
 	return [...routing.entries()].filter(([, route]) => route === answerer).map(([id]) => id);
 }
 
-export function routingAnswersForDisplay(routing: Map<string, PlanAnswerer>): Record<string, ClassifierAnswer> {
+export function routingAnswersForDisplay(routing: Map<string, DecisionAnswerer>): Record<string, ClassifierAnswer> {
 	const answers: Record<string, ClassifierAnswer> = {};
 	for (const [questionId, answerer] of routing) {
 		answers[answererRoutingQuestionId(questionId)] = {
@@ -141,6 +191,7 @@ export function planModeSystemSection(decisionDriven: boolean): string {
 			"Ask clarifying questions with the ask_decision tool (yes/no or multiple choice).",
 			`When enough context is gathered, include a yes/no question asking whether to draft the plan (prefer id "${READY_TO_DRAFT_PLAN_ID}" or wording like "Ready to draft the plan?").`,
 			"After the harness confirms ready_to_draft_plan, output numbered steps under a Plan: header.",
+			"The harness routes each ask_decision question to the classifier (jev) or a human questionnaire — do not assume every question is answered by the user.",
 		);
 	} else {
 		lines.push(

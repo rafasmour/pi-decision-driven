@@ -265,6 +265,39 @@ describe("decision-driven loop", () => {
 		expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(true);
 	});
 
+	it("returns an error tool result for a single-option question instead of throwing", async () => {
+		const classify = vi.fn(async () => ({ answers: fixedAnswers, stopReason: "stop" as const }));
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			classify,
+		};
+		const { messages } = await collect(
+			config,
+			{ messages: [], tools: [] },
+			scriptedStream(
+				decisionCall(
+					"decision-bad",
+					jsonArguments({
+						questions: [
+							{
+								id: "explore_structure",
+								prompt: "Explore?",
+								options: [{ value: "yes", label: "Yes" }],
+							},
+						],
+					}),
+				),
+			),
+		);
+		expect(classify).not.toHaveBeenCalled();
+		const toolResult = messages.find((m) => m.role === "toolResult");
+		expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(true);
+		expect(
+			toolResult?.role === "toolResult" && toolResult.content[0].type === "text" && toolResult.content[0].text,
+		).toMatch(/single option|at least 2 options/i);
+	});
+
 	it("does not treat ask_decision specially without decision mode", async () => {
 		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
 

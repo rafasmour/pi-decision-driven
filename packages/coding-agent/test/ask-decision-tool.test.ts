@@ -13,11 +13,9 @@ describe("ask_decision tool", () => {
 });
 
 describe("decision pre-auth tools", () => {
-	it("keeps ask_decision and read-only tools", () => {
+	it("keeps only ask_decision until Act unlock", () => {
 		expect(decisionPreAuthToolNames(["read", "bash", "edit", DECISION_TOOL_NAME, "grep"])).toEqual([
-			"read",
 			DECISION_TOOL_NAME,
-			"grep",
 		]);
 	});
 });
