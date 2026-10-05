@@ -30,7 +30,7 @@ export const defaultModelPerProvider: Partial<Record<KnownProvider, string>> = {
 	google: "gemini-3.1-pro-preview",
 	"google-vertex": "gemini-3.1-pro-preview",
 	"github-copilot": "gpt-5.4",
-	openrouter: "moonshotai/kimi-k2.6",
+	openrouter: "openrouter/free",
 	"vercel-ai-gateway": "zai/glm-5.1",
 	xai: "grok-4.7",
 	groq: "openai/gpt-oss-120b",
@@ -60,6 +60,22 @@ export const defaultModelPerProvider: Partial<Record<KnownProvider, string>> = {
 	"xiaomi-token-plan-ams": "mimo-v2.5-pro",
 	"xiaomi-token-plan-sgp": "mimo-v2.5-pro",
 };
+
+/**
+ * Default classifier (decision) model IDs per provider. Prefer free OpenRouter/OpenCode
+ * options when the catalog offers them.
+ */
+export const defaultClassifierPerProvider: Partial<Record<KnownProvider, string>> = {
+	openrouter: "inception/mercury-decide:free",
+	opencode: "jev-1.13-free",
+	typesafe: "jev-latest",
+	"vercel-ai-gateway": "convaiinnovations/laya-free",
+	"cloudflare-workers-ai": "typesafe/jev",
+};
+
+/** Global fallback when no saved classifier default and the chat provider has none. */
+export const DEFAULT_CLASSIFIER_PROVIDER: KnownProvider = "openrouter";
+export const DEFAULT_CLASSIFIER_MODEL = "inception/mercury-decide:free";
 
 export interface ScopedModel {
 	model: Model<Api>;

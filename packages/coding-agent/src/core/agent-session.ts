@@ -29,9 +29,9 @@ import {
 	type AgentTurnDecision,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	createMessageCheckpoint,
 	DECISION_TOOL_NAME,
 	type DecisionResultContext,
-	createMessageCheckpoint,
 	type PrepareNextTurnContext,
 	runToolCall,
 	type ThinkingLevel,
@@ -91,6 +91,14 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
+import { assistantTextHasCheckboxList, extractCheckboxTodoItems } from "./decision/act-checklist.ts";
+import { resolveAnswererRoutedBatch } from "./decision/answerer-routed-turn.ts";
+import {
+	askDecisionOnlyHarnessMessage,
+	isAskDecisionOnlyViolation,
+	phaseForAskDecisionOnly,
+} from "./decision/ask-phase-undo.ts";
+import { enrichDecisionClassifierContext } from "./decision/classifier-session-state.ts";
 import { findLowConfidenceAnswers } from "./decision/confidence-gate.ts";
 import { buildDecisionTurnMessages } from "./decision/decision-follow-up.ts";
 import {
@@ -101,6 +109,11 @@ import {
 	qualityGateDecisionMessages,
 	rollbackDraft,
 } from "./decision/decision-gates-session.ts";
+import {
+	type DecisionSessionPhase,
+	isGoalClear,
+	resolveDecisionSessionPhase,
+} from "./decision/decision-session-phase.ts";
 import { draftTextFromAssistant, isUserFacingDraft } from "./decision/draft-heuristic.ts";
 import {
 	appendGoalCardRecent,
@@ -113,10 +126,10 @@ import {
 import { goalRefineClassifierContext, mergeRefinedGoalCard } from "./decision/goal-refine.ts";
 import { offPlanClassifierContext, parseOffPlanResult } from "./decision/off-plan.ts";
 import { parseDecisionBlockFromAssistant } from "./decision/parse-decision-block.ts";
-import { decisionPreAuthToolNames } from "./decision/pre-auth-tools.ts";
 import { isPlanModePlanning, loadPlanModeFromBranch } from "./decision/plan-mode-state.ts";
 import { resolvePlanModeDecisionTurn } from "./decision/plan-mode-turn.ts";
 import { planModeSystemSection } from "./decision/plan-routing.ts";
+import { decisionPreAuthToolNames } from "./decision/pre-auth-tools.ts";
 import {
 	applyQualityRouteWithRetries,
 	parseQualityGateResult,
@@ -130,7 +143,15 @@ import {
 	needsSecuritySensitivityClassify,
 	securityClassifierContext,
 } from "./decision/security-gate.ts";
+import { DECISION_TOOL_FAILURE_RETRY_CAP, toolFailureRetryHarnessMessage } from "./decision/tool-failure-retry.ts";
 import { detectToolIntentFromAnswers, intentSummaryFromAnswers, toolNamesForIntent } from "./decision/tool-intent.ts";
+import {
+	actChecklistHarnessPrompt,
+	nudgeGoalClarityHarnessPrompt,
+	parseGoalClarityFromAnswers,
+	parseVerifyContinueFixingFromAnswers,
+	verifyHarnessPrompt,
+} from "./decision/verify-route.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -582,10 +603,14 @@ export class AgentSession {
 			this.agent.decisionConfig = undefined;
 			this._decisionGates.restrictedToolNames = undefined;
 			this._decisionGates.respondAuthorized = false;
+			this._decisionGates.verifying = false;
+			this._decisionGates.actChecklistDone = false;
+			this._decisionGates.verifyForceRetriesUsed = 0;
 			this._pendingAskDecisionBatch = undefined;
 			this._pendingInterpretMessages = undefined;
 			this._decisionBlockRun = false;
 			this._rebuildSystemPrompt(this.getActiveToolNames());
+			this._updateDecisionPhaseStatus();
 			return;
 		}
 
@@ -596,17 +621,40 @@ export class AgentSession {
 			maxQualityRetries: this.settingsManager.getMaxQualityRetries() ?? 0,
 			confidenceThreshold: this.settingsManager.getDecisionConfidenceThreshold() ?? 0.65,
 		};
-		if (!this._decisionGates.respondAuthorized) {
+		this._applyDecisionToolRestriction();
+		this._rebuildSystemPrompt(this._promptToolNames());
+		this._updateDecisionPhaseStatus();
+	}
+
+	/** Ask-only / verify-only / intent restriction for declared + executable tools. */
+	private _applyDecisionToolRestriction(): void {
+		if (!this._isDecisionDrivenEnabled()) {
+			this._decisionGates.restrictedToolNames = undefined;
+			return;
+		}
+		if (this._decisionGates.verifying || !this._decisionGates.respondAuthorized) {
 			const preAuth = decisionPreAuthToolNames(this.getActiveToolNames());
 			this._decisionGates.restrictedToolNames = preAuth.length > 0 ? preAuth : [];
+			return;
 		}
-		this._rebuildSystemPrompt(this.getActiveToolNames());
+		// Intent-scoped restriction may already be set; leave undefined for full Act.
+	}
+
+	/** Tool names to list in the system prompt — matches the pre-auth / intent restriction when set. */
+	private _promptToolNames(): string[] {
+		const active = this.getActiveToolNames();
+		const restricted = this._decisionGates.restrictedToolNames;
+		if (this._isDecisionDrivenEnabled() && restricted && restricted.length > 0) {
+			const allowed = new Set(restricted);
+			return active.filter((name) => allowed.has(name));
+		}
+		return active;
 	}
 
 	private _ensureAskDecisionTool(enabled: boolean): void {
 		const hasTool = this._baseToolDefinitions.has(DECISION_TOOL_NAME);
 		if (enabled && !hasTool) {
-			this._baseToolDefinitions.set(DECISION_TOOL_NAME, createAskDecisionToolDefinition());
+			this._baseToolDefinitions.set(DECISION_TOOL_NAME, createAskDecisionToolDefinition() as ToolDefinition);
 			this._refreshToolRegistry({
 				activeToolNames: [...this.getActiveToolNames(), DECISION_TOOL_NAME],
 			});
@@ -651,7 +699,45 @@ export class AgentSession {
 			this._pendingInterpretMessages = planTurn.messages;
 			return { answers: planTurn.answers, stopReason: "stop" };
 		}
-		return this._runDecisionClassify(context, signal);
+		if (batch) {
+			const routed = await this._resolveBuildModeAskDecision(batch, signal);
+			if (routed.status === "blocked") {
+				return { answers: {}, stopReason: "error", errorMessage: "Build-mode decision blocked" };
+			}
+			return { answers: routed.answers, stopReason: "stop" };
+		}
+		return this._runDecisionClassify(this._enrichAskOrQualityContext(context), signal);
+	}
+
+	/** Build-mode ask_decision: route each question to jev vs human, then answer. */
+	private async _resolveBuildModeAskDecision(
+		batch: AskDecisionArguments,
+		signal?: AbortSignal,
+	): Promise<
+		{ status: "blocked" } | { status: "continue"; answers: Record<string, ClassifierResult["answers"][string]> }
+	> {
+		const goalCard = this._goalCard ?? emptyGoalCard();
+		const routed = await resolveAnswererRoutedBatch(batch, {
+			goalCard,
+			phase: "build",
+			hooks: {
+				classify: (ctx, classifySignal) =>
+					this._runDecisionClassify(this._enrichAskOrQualityContext(ctx), classifySignal),
+			},
+			ui: this._extensionUIContext,
+			mode: this._extensionMode,
+			signal,
+		});
+		if (routed.status === "blocked") return { status: "blocked" };
+		return { status: "continue", answers: routed.answers };
+	}
+
+	/** Harness-owned GoalCard + user_request + recent_tools for Ask and quality gate. */
+	private _enrichAskOrQualityContext(context: ClassifierContext): ClassifierContext {
+		return enrichDecisionClassifierContext(context, {
+			goalCard: this._goalCard ?? emptyGoalCard(),
+			messages: this.agent.state.messages,
+		});
 	}
 
 	private async _interpretDecision(
@@ -790,8 +876,8 @@ export class AgentSession {
 			return { action: "continue" };
 		}
 
-		const classified = await this._runDecisionClassify(toClassifierContext(batch), signal);
-		if (classified.stopReason !== "stop") return undefined;
+		const classified = await this._resolveBuildModeAskDecision(batch, signal);
+		if (classified.status === "blocked") return { action: "end" };
 
 		const postDecision = await this._handlePostDecisionClassification(batch, classified.answers, signal);
 		if (postDecision.blocked) return { action: "end" };
@@ -860,16 +946,63 @@ export class AgentSession {
 			if (restricted && restricted.length > 0) {
 				this._decisionGates.restrictedToolNames = restricted;
 				this._decisionGates.respondAuthorized = false;
+			} else {
+				// Intent family matches no Act tools (or respond) — lift pre-auth.
+				this._decisionGates.respondAuthorized = true;
+				this._decisionGates.restrictedToolNames = undefined;
 			}
 		} else if (intent === "respond") {
 			this._decisionGates.respondAuthorized = true;
 			this._decisionGates.restrictedToolNames = undefined;
+		} else {
+			// First successful classify with no tool-family intent lifts pre-auth so Act tools work.
+			// Set respondAuthorized so later _syncDecisionDrivenMode cannot re-apply pre-auth.
+			this._decisionGates.respondAuthorized = true;
+			this._decisionGates.restrictedToolNames = undefined;
+		}
+
+		if (this._decisionGates.verifying) {
+			const continueFixing = parseVerifyContinueFixingFromAnswers(answers);
+			if (continueFixing === true) {
+				this._decisionGates.verifying = false;
+				this._decisionGates.verifyForceRetriesUsed = 0;
+				this._decisionGates.actChecklistDone = false;
+				this._decisionGates.respondAuthorized = true;
+				this._decisionGates.restrictedToolNames = undefined;
+			} else if (continueFixing === false) {
+				this._decisionGates.verifying = false;
+				this._decisionGates.verifyForceRetriesUsed = 0;
+				this._decisionBlockRun = true;
+			}
+		} else if (this._decisionGates.respondAuthorized && !isGoalClear(this._goalCard)) {
+			const goalClear = parseGoalClarityFromAnswers(answers);
+			const proposedGoal = typeof batch.goal === "string" ? batch.goal.trim() : "";
+			if (proposedGoal.length >= 8) {
+				const card = this._goalCard ?? emptyGoalCard();
+				this._goalCard = { ...card, goal: proposedGoal };
+				persistGoalCard(this.sessionManager, this._goalCard);
+			}
+			if (goalClear === false) {
+				this._decisionGates.respondAuthorized = false;
+				this._applyDecisionToolRestriction();
+			} else if (goalClear === true || isGoalClear(this._goalCard)) {
+				this._decisionGates.actChecklistDone = false;
+				this._decisionGates.restrictedToolNames = undefined;
+			}
+		} else if (this._decisionGates.respondAuthorized && isGoalClear(this._goalCard)) {
+			// Fresh unlock into act — require checklist once per stretch.
+			if (!this._decisionGates.actChecklistDone) {
+				this._decisionGates.actChecklistDone = false;
+			}
 		}
 
 		if (this._goalCard) {
 			this._goalCard = appendGoalCardRecent(this._goalCard, intentSummaryFromAnswers(batch, answers, intent));
 			persistGoalCard(this.sessionManager, this._goalCard);
 		}
+		this._applyDecisionToolRestriction();
+		this._rebuildSystemPrompt(this._promptToolNames());
+		this._updateDecisionPhaseStatus();
 		return { blocked: false };
 	}
 
@@ -912,16 +1045,24 @@ export class AgentSession {
 		turn: AgentTurnContext,
 		signal?: AbortSignal,
 	): Promise<AgentTurnDecision | undefined> {
-		if (!this._isDecisionDrivenEnabled()) return undefined;
-		if (isPlanModePlanning(loadPlanModeFromBranch(this.sessionManager.getBranch()))) return undefined;
-		if (!isUserFacingDraft(turn.message)) return undefined;
-		if (!this._decisionGates.respondAuthorized && this._decisionGates.restrictedToolNames) return undefined;
+		const decisionDriven = this._isDecisionDrivenEnabled();
+		const planPlanning = isPlanModePlanning(loadPlanModeFromBranch(this.sessionManager.getBranch()));
+		const userFacing = isUserFacingDraft(turn.message);
+		const skipPreAuth = !this._decisionGates.respondAuthorized && Boolean(this._decisionGates.restrictedToolNames);
+		if (!decisionDriven) return undefined;
+		if (planPlanning) return undefined;
+		if (!userFacing) return undefined;
+		if (skipPreAuth) return undefined;
+		// End-of-act settle uses verify phase instead of the draft quality gate.
+		const phase = this.getDecisionSessionPhase();
+		if (phase === "act" || phase === "verify") return undefined;
 
 		const goalCard = this._goalCard ?? emptyGoalCard();
 		const draft = draftTextFromAssistant(turn.message);
-		const gateContext = qualityGateClassifierContext(goalCard, draft);
+		const hasGoal = goalCard.goal.trim().length > 0;
+		const gateContext = this._enrichAskOrQualityContext(qualityGateClassifierContext(goalCard, draft));
 		const classified = await this._runDecisionClassify(gateContext, signal);
-		const parsed = parseQualityGateResult(classified);
+		const parsed = parseQualityGateResult(classified, { hasGoal });
 		const maxRetries = this.agent.decisionConfig?.maxQualityRetries ?? 0;
 		const route = applyQualityRouteWithRetries(parsed, this._decisionGates.qualityRetriesUsed, maxRetries);
 
@@ -1410,16 +1551,181 @@ export class AgentSession {
 				this._decisionBlockRun = false;
 				return { action: "end" };
 			}
-			if (turn.toolResults.length > 0 && this._decisionGates.respondAuthorized) {
+			if (turn.toolResults.length > 0 && this._decisionGates.respondAuthorized && !this._decisionGates.verifying) {
 				this._decisionGates.restrictedToolNames = undefined;
 			}
+
+			const askOnlyRetry = this._maybeRetryAskDecisionOnlyTurn(turn);
+			if (askOnlyRetry) return askOnlyRetry;
+
+			const toolRetry = this._maybeRetryFailedToolTurn(turn);
+			if (toolRetry) return toolRetry;
+
+			const checklist = this._maybeEnforceActChecklist(turn);
+			if (checklist) return checklist;
+
 			const quality = await this._maybeRunQualityGate(turn, signal);
 			if (quality) return quality;
+
 			const classified = await this._maybeClassifyParsedDecisions(turn, signal);
 			if (classified) return classified;
+
+			const verifyForce = this._maybeForceVerifyAfterAct(turn);
+			if (verifyForce) return verifyForce;
+
+			const nudgePrompt = this._maybeNudgeGoalClarityHarness(turn);
+			if (nudgePrompt) return nudgePrompt;
+
 			if (extensionContinue || previousDecision?.action === "continue") return { action: "continue" };
 			return undefined;
 		};
+	}
+
+	/** Current harness phase for decision-driven sessions. */
+	getDecisionSessionPhase(): DecisionSessionPhase | undefined {
+		return resolveDecisionSessionPhase({
+			decisionDriven: this._isDecisionDrivenEnabled(),
+			respondAuthorized: this._decisionGates.respondAuthorized,
+			verifying: this._decisionGates.verifying,
+			goalCard: this._goalCard,
+		});
+	}
+
+	private _updateDecisionPhaseStatus(): void {
+		const ui = this._extensionUIContext;
+		if (!ui) return;
+		const phase = this.getDecisionSessionPhase();
+		if (!phase) {
+			ui.setStatus("decision-phase", undefined);
+			ui.setWidget("act-todos", undefined);
+			return;
+		}
+		const color = phase === "ask" ? "warning" : phase === "nudge" ? "accent" : phase === "act" ? "success" : "muted";
+		ui.setStatus("decision-phase", theme.fg(color, phase));
+	}
+
+	private _pushHarnessContinue(turn: AgentTurnContext, content: string): AgentTurnDecision {
+		const retryMessage = { role: "user" as const, content, timestamp: Date.now() };
+		turn.context.messages.push(retryMessage);
+		this.sessionManager.appendMessage(retryMessage);
+		this._rebuildSystemPrompt(this._promptToolNames());
+		this._updateDecisionPhaseStatus();
+		return { action: "continue" };
+	}
+
+	/**
+	 * Ask/verify: omit illegal or text-only turns from model projection and retry.
+	 */
+	private _maybeRetryAskDecisionOnlyTurn(turn: AgentTurnContext): AgentTurnDecision | undefined {
+		if (!this._isDecisionDrivenEnabled()) return undefined;
+		if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return undefined;
+		const locked = phaseForAskDecisionOnly(this.getDecisionSessionPhase());
+		if (!locked) return undefined;
+		if (!isAskDecisionOnlyViolation(turn.message)) return undefined;
+		if (this._decisionGates.toolFailureRetriesUsed >= DECISION_TOOL_FAILURE_RETRY_CAP) return undefined;
+
+		this._omitRecoveryAttempt(turn.message, turn.toolResults);
+		this._refreshFinalizedContext();
+		this._decisionGates.toolFailureRetriesUsed++;
+		return this._pushHarnessContinue(turn, askDecisionOnlyHarnessMessage(locked));
+	}
+
+	/** Act entry: require a checkbox task list before tool work. */
+	private _maybeEnforceActChecklist(turn: AgentTurnContext): AgentTurnDecision | undefined {
+		if (!this._isDecisionDrivenEnabled()) return undefined;
+		if (this.getDecisionSessionPhase() !== "act") return undefined;
+		if (this._decisionGates.actChecklistDone) return undefined;
+		if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return undefined;
+
+		const text = contentText(turn.message.content, "");
+		if (assistantTextHasCheckboxList(text)) {
+			this._decisionGates.actChecklistDone = true;
+			const items = extractCheckboxTodoItems(text);
+			const ui = this._extensionUIContext;
+			if (ui && items.length > 0) {
+				ui.setWidget(
+					"act-todos",
+					items.map((item) => `${theme.fg("muted", "☐ ")}${item}`),
+				);
+			}
+			this._updateDecisionPhaseStatus();
+			return undefined;
+		}
+
+		const hasTools = turn.message.content.some((part) => part.type === "toolCall");
+		if (!hasTools && turn.toolResults.length === 0) {
+			// Soft: text without checklist — omit and ask for list.
+			if (this._decisionGates.toolFailureRetriesUsed >= DECISION_TOOL_FAILURE_RETRY_CAP) return undefined;
+			this._omitRecoveryAttempt(turn.message, turn.toolResults);
+			this._refreshFinalizedContext();
+			this._decisionGates.toolFailureRetriesUsed++;
+			return this._pushHarnessContinue(turn, actChecklistHarnessPrompt());
+		}
+		if (hasTools) {
+			if (this._decisionGates.toolFailureRetriesUsed >= DECISION_TOOL_FAILURE_RETRY_CAP) return undefined;
+			this._omitRecoveryAttempt(turn.message, turn.toolResults);
+			this._refreshFinalizedContext();
+			this._decisionGates.toolFailureRetriesUsed++;
+			return this._pushHarnessContinue(turn, actChecklistHarnessPrompt());
+		}
+		return undefined;
+	}
+
+	/** After act completes without tools, force verify phase. */
+	private _maybeForceVerifyAfterAct(turn: AgentTurnContext): AgentTurnDecision | undefined {
+		if (!this._isDecisionDrivenEnabled()) return undefined;
+		if (this.getDecisionSessionPhase() !== "act") return undefined;
+		if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return undefined;
+		const hasTools = turn.message.content.some((part) => part.type === "toolCall");
+		if (hasTools || turn.toolResults.length > 0) return undefined;
+		if (this._decisionGates.verifyForceRetriesUsed >= DECISION_TOOL_FAILURE_RETRY_CAP) return undefined;
+
+		this._decisionGates.verifying = true;
+		this._decisionGates.verifyForceRetriesUsed++;
+		this._applyDecisionToolRestriction();
+		// Keep the act turn in context (do not omit) — model must verify what it did.
+		return this._pushHarnessContinue(turn, verifyHarnessPrompt());
+	}
+
+	/** Nudge phase: remind to ask goal clarity if the model stopped without asking. */
+	private _maybeNudgeGoalClarityHarness(turn: AgentTurnContext): AgentTurnDecision | undefined {
+		if (!this._isDecisionDrivenEnabled()) return undefined;
+		if (this.getDecisionSessionPhase() !== "nudge") return undefined;
+		if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return undefined;
+		const hasAsk = turn.message.content.some((part) => part.type === "toolCall" && part.name === DECISION_TOOL_NAME);
+		if (hasAsk) return undefined;
+		if (this._decisionGates.toolFailureRetriesUsed >= DECISION_TOOL_FAILURE_RETRY_CAP) return undefined;
+
+		this._omitRecoveryAttempt(turn.message, turn.toolResults);
+		this._refreshFinalizedContext();
+		this._decisionGates.toolFailureRetriesUsed++;
+		return this._pushHarnessContinue(turn, nudgeGoalClarityHarnessPrompt());
+	}
+
+	/**
+	 * When a tool call fails in decision-driven mode, omit the failed assistant turn + tool results
+	 * from model context and inject a harness correction (same pattern as quality-gate retry).
+	 */
+	private _maybeRetryFailedToolTurn(turn: AgentTurnContext): AgentTurnDecision | undefined {
+		if (!this._isDecisionDrivenEnabled()) return undefined;
+		if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return undefined;
+		const locked = phaseForAskDecisionOnly(this.getDecisionSessionPhase());
+		// Ask/verify violations are handled by _maybeRetryAskDecisionOnlyTurn.
+		if (locked && isAskDecisionOnlyViolation(turn.message)) return undefined;
+		const failed = turn.toolResults.filter((result) => result.isError);
+		if (failed.length === 0) {
+			this._decisionGates.toolFailureRetriesUsed = 0;
+			return undefined;
+		}
+		if (this._decisionGates.toolFailureRetriesUsed >= DECISION_TOOL_FAILURE_RETRY_CAP) {
+			return undefined;
+		}
+
+		this._omitRecoveryAttempt(turn.message, turn.toolResults);
+		this._refreshFinalizedContext();
+		this._decisionGates.toolFailureRetriesUsed++;
+		const content = toolFailureRetryHarnessMessage(failed);
+		return this._pushHarnessContinue(turn, content);
 	}
 
 	private _installAgentNextTurnRefresh(): void {
@@ -1435,9 +1741,11 @@ export class AgentSession {
 			const runOptions = this._runSystemPromptOptions ?? this._baseSystemPromptOptions;
 			const options = normalizeBuildSystemPromptOptions({
 				...runOptions,
-				selectedTools: this.getActiveToolNames(),
+				selectedTools: this._promptToolNames(),
 				toolSnippets: { ...this._baseSystemPromptOptions.toolSnippets, ...runOptions.toolSnippets },
 				toolGuidelines: { ...this._baseSystemPromptOptions.toolGuidelines, ...runOptions.toolGuidelines },
+				decisionDriven: this._isDecisionDrivenEnabled(),
+				decisionSessionPhase: this.getDecisionSessionPhase(),
 			});
 			const updateMessage = this._preparePromptAndToolLoadout(options, nextContext.messages);
 			// Keep session.systemPrompt and ctx.getSystemPrompt() in step with what the provider sees.
@@ -1628,9 +1936,7 @@ export class AgentSession {
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
 		if (event.type === "tool_execution_start" && event.toolName === DECISION_TOOL_NAME) {
-			this._pendingAskDecisionBatch = parseAskDecisionArguments(
-				(event.args ?? {}) as Record<string, unknown>,
-			);
+			this._pendingAskDecisionBatch = parseAskDecisionArguments((event.args ?? {}) as Record<string, unknown>);
 			this._pendingInterpretMessages = undefined;
 		}
 		// Record the calls a tool made through ctx.executeTool() and their usage on its result message.
@@ -1975,8 +2281,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Decision model for this session: the one picked with `/classifier`, otherwise the saved
-	 * `defaultClassifierProvider`/`defaultClassifierModel`, if it still resolves to a classifier model.
+	 * Decision model for this session: the one picked with `/classifier`, otherwise
+	 * `defaultClassifierProvider`/`defaultClassifierModel` (built-in OpenRouter free when unset).
 	 */
 	get classifierModel(): ModelTypeMap["classifier"] | undefined {
 		if (this._classifierModel) return this._classifierModel;
@@ -2257,6 +2563,7 @@ export class AgentSession {
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
 		const decisionDriven = this._isDecisionDrivenEnabled();
+		const decisionSessionPhase = this.getDecisionSessionPhase();
 		const planState = loadPlanModeFromBranch(this.sessionManager.getBranch());
 		const sections: Record<string, string> = {};
 		if (isPlanModePlanning(planState)) {
@@ -2272,15 +2579,18 @@ export class AgentSession {
 			toolSnippets,
 			toolGuidelines: Object.fromEntries(this._toolPromptGuidelines),
 			decisionDriven,
+			decisionSessionPhase,
 			sections,
 			promptGuidelines: decisionDriven
 				? [
-						"Exactly two modes: Ask (ask_decision tool) or Act (other tools)",
-						"Do not put decisions in prose JSON or markdown fences — call ask_decision",
-						"Do not skip asking to implement or guess — ask_decision and wait for harness answers",
+						"Do not decide in thinking — only describe the situation, then call ask_decision",
+						"Only call tools listed in the current tools section / request declarations",
+						"In ask/verify phases, ask_decision is the only tool",
+						"In act, start with a checkbox task list; ask_decision is optional mid-task",
 					]
 				: [],
 		});
+		this._updateDecisionPhaseStatus();
 	}
 
 	/**

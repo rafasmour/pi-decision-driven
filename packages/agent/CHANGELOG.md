@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Invalid `ask_decision` questionnaire mapping (for example a single option) returns an error tool result instead of throwing out of the decision loop.
 - Declared tool loadout after `prepareRequest` so request-time tool restrictions (decision-driven pre-auth) match what the model can call. Previously tools were declared first, so models saw `write`/`edit` then got "Tool … not found".
 - Initial `runAgentLoop` prompts no longer declare the full tool set before `prepareRequest`; the first request declares tools only after restrictions apply.
 

@@ -1,8 +1,8 @@
 import { DECISION_TOOL_NAME } from "@earendil-works/pi-agent-core";
 import { describe, expect, it } from "vitest";
 import { decisionPreAuthToolNames } from "../src/core/decision/pre-auth-tools.ts";
-import { createAskDecisionToolDefinition } from "../src/core/tools/ask-decision.ts";
 import { toolNamesForIntent } from "../src/core/decision/tool-intent.ts";
+import { createAskDecisionToolDefinition } from "../src/core/tools/ask-decision.ts";
 
 describe("ask_decision tool", () => {
 	it("registers under the reserved decision tool name", () => {
@@ -13,11 +13,9 @@ describe("ask_decision tool", () => {
 });
 
 describe("decision pre-auth tools", () => {
-	it("keeps ask_decision and read-only tools", () => {
+	it("keeps only ask_decision until Act unlock", () => {
 		expect(decisionPreAuthToolNames(["read", "bash", "edit", DECISION_TOOL_NAME, "grep"])).toEqual([
-			"read",
 			DECISION_TOOL_NAME,
-			"grep",
 		]);
 	});
 });

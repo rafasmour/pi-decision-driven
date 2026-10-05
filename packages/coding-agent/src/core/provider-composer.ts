@@ -25,6 +25,8 @@ import {
 	type StreamOptions,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
+import { llamaCppClassifyApi } from "@earendil-works/pi-ai/api/llama-cpp-classify.lazy";
+import { typesafeSystemOneApi } from "@earendil-works/pi-ai/api/typesafe-system-one.lazy";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { classifierErrorResult, imageErrorResult } from "@earendil-works/pi-ai/utils/model-operations";
 import type { ModelConfig, ModelsJsonModel, ModelsJsonModelOverride, ModelsJsonProvider } from "./model-config.ts";
@@ -36,6 +38,12 @@ import {
 	resolveConfigValueOrThrow,
 	resolveHeadersOrThrow,
 } from "./resolve-config-value.ts";
+
+/** Built-in classifier APIs models.json entries may reference by `api` name. */
+const BUILTIN_CLASSIFIER_APIS: Partial<Record<ClassifierApi, () => ProviderClassifier>> = {
+	"typesafe-system-one": typesafeSystemOneApi,
+	"llama-cpp-classify": llamaCppClassifyApi,
+};
 
 export interface ExtensionOAuthConfig {
 	name: string;
@@ -690,11 +698,18 @@ export function composeModelProvider(
 			);
 		};
 	}
-	const extensionClassifiers = extension?.classifiers;
+
+	const builtinClassifiers: Partial<Record<ClassifierApi, ProviderClassifier>> = {};
+	for (const model of getAllModels()) {
+		if (!isModelType(model, "classifier")) continue;
+		const factory = BUILTIN_CLASSIFIER_APIS[model.api];
+		if (factory && !builtinClassifiers[model.api]) builtinClassifiers[model.api] = factory();
+	}
+	const extensionClassifiers = { ...builtinClassifiers, ...extension?.classifiers };
 	const classify = base?.classify;
-	if (classify || Object.keys(extensionClassifiers ?? {}).length > 0) {
+	if (classify || Object.keys(extensionClassifiers).length > 0) {
 		provider.classify = (model, context, options) => {
-			const implementation = extensionClassifiers?.[model.api];
+			const implementation = extensionClassifiers[model.api];
 			if (implementation) return implementation.classify(model, context, options);
 			if (classify) return classify(model, context, options);
 			return Promise.resolve(

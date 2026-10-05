@@ -1,9 +1,9 @@
 import { DECISION_TOOL_NAME } from "@earendil-works/pi-agent-core";
 
-/** Tool names allowed before the first successful decision classify. */
-export const DECISION_PRE_AUTH_READ_TOOLS = ["read", "grep", "find", "ls"] as const;
-
+/**
+ * Tools allowed before the first successful decision classify unlocks Act tools.
+ * Ask-only: no read/explore tools so the chat model cannot drift into agentic exploration.
+ */
 export function decisionPreAuthToolNames(activeToolNames: readonly string[]): string[] {
-	const allowed = new Set<string>([DECISION_TOOL_NAME, ...DECISION_PRE_AUTH_READ_TOOLS]);
-	return activeToolNames.filter((name) => allowed.has(name));
+	return activeToolNames.filter((name) => name === DECISION_TOOL_NAME);
 }

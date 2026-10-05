@@ -681,7 +681,23 @@ async function runDecision(
 	const rawQuestions: unknown = toolCall.arguments.questions;
 	const rawState: unknown = toolCall.arguments.state;
 	const rawGoal: unknown = toolCall.arguments.goal;
-	const resolved = resolveDecisionClassifierContext(rawQuestions, rawState, rawGoal);
+	let resolved: ReturnType<typeof resolveDecisionClassifierContext>;
+	try {
+		resolved = resolveDecisionClassifierContext(rawQuestions, rawState, rawGoal);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		const finalized: FinalizedToolCallOutcome = {
+			toolCall,
+			result: createErrorToolResult(
+				`Invalid ${DECISION_TOOL_NAME} questions: ${message}. Each question must be self-contained; omit options for yes/no or provide at least 2 options (never exactly one).`,
+			),
+			isError: true,
+		};
+		await emitToolExecutionEnd(finalized, emit);
+		const toolResultMessage = createToolResultMessage(finalized);
+		await emitToolResultMessage(toolResultMessage, emit);
+		return { messages: [toolResultMessage], terminate: false, appendedMessages: undefined, phase: "idle" };
+	}
 	let finalized: FinalizedToolCallOutcome;
 	let phase: DecisionPhase = "idle";
 	let appendedMessages: AgentMessage[] | undefined;

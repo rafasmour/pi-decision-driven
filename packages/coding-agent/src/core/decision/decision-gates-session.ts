@@ -14,12 +14,27 @@ import {
 export interface DecisionGateRuntime {
 	draftCheckpoint?: number;
 	qualityRetriesUsed: number;
+	/** Consecutive omit-and-retry attempts after failed tool calls (ask_decision validation, etc.). */
+	toolFailureRetriesUsed: number;
 	restrictedToolNames?: string[];
 	respondAuthorized: boolean;
+	/** End-of-act verify phase (ask_decision-only until settle or continue-fix). */
+	verifying: boolean;
+	/** Act-entry checkbox task list has been accepted for this authorization stretch. */
+	actChecklistDone: boolean;
+	/** Cap for forced verify harness continues when the model skips ask_decision. */
+	verifyForceRetriesUsed: number;
 }
 
 export function createDecisionGateRuntime(): DecisionGateRuntime {
-	return { qualityRetriesUsed: 0, respondAuthorized: false };
+	return {
+		qualityRetriesUsed: 0,
+		toolFailureRetriesUsed: 0,
+		respondAuthorized: false,
+		verifying: false,
+		actChecklistDone: false,
+		verifyForceRetriesUsed: 0,
+	};
 }
 
 export function applyToolRestriction(context: AgentContext, restrictedToolNames: string[] | undefined): AgentContext {

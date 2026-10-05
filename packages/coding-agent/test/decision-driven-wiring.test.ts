@@ -82,9 +82,9 @@ describe("decision-driven system prompt (S4)", () => {
 	it("documents ask_decision and omits the skill index", () => {
 		const prompt = buildSystemPrompt({
 			decisionDriven: true,
-			selectedTools: ["read", "ask_decision"],
+			decisionSessionPhase: "ask",
+			selectedTools: ["ask_decision"],
 			toolSnippets: {
-				read: "Read files",
 				ask_decision: "Ask the classifier a structured decision",
 			},
 			skills: [testSkill],
@@ -94,9 +94,66 @@ describe("decision-driven system prompt (S4)", () => {
 
 		expect(prompt).toContain("decision-driven harness");
 		expect(prompt).toContain("ask_decision");
+		expect(prompt).toContain("only allowed tool");
+		expect(prompt).toContain("thought process");
+		expect(prompt).toContain("<decision_loop>");
+		expect(prompt).toContain("Phase: ask");
 		expect(prompt).toContain("<ask_decision>");
+		expect(prompt).toContain("self-contained");
+		expect(prompt).toContain("harness state only");
+		expect(prompt).toContain("Never a single option");
+		expect(prompt).toContain("preference/policy");
+		expect(prompt).toContain("not the default ask path");
 		expect(prompt).not.toContain("<available_skills>");
 		expect(prompt).toContain("skill_help");
+	});
+
+	it("uses act decision_loop when phase is act", () => {
+		const prompt = buildSystemPrompt({
+			decisionDriven: true,
+			decisionSessionPhase: "act",
+			selectedTools: ["ask_decision", "write"],
+			toolSnippets: {
+				ask_decision: "Ask the classifier a structured decision",
+				write: "Write a file",
+			},
+			skills: [],
+			contextFiles: [],
+			cwd: "/tmp",
+		});
+		expect(prompt).toContain("<decision_loop>");
+		expect(prompt).toContain("Phase: act");
+		expect(prompt).toContain("checkbox");
+		expect(prompt).toContain("<ask_decision>");
+	});
+
+	it("includes verify decision_loop when phase is verify", () => {
+		const prompt = buildSystemPrompt({
+			decisionDriven: true,
+			decisionSessionPhase: "verify",
+			selectedTools: ["ask_decision"],
+			toolSnippets: { ask_decision: "Ask the classifier" },
+			skills: [],
+			contextFiles: [],
+			cwd: "/tmp",
+		});
+		expect(prompt).toContain("<decision_loop>");
+		expect(prompt).toContain("Phase: verify");
+		expect(prompt).toContain("continue fixing");
+	});
+
+	it("includes nudge decision_loop when phase is nudge", () => {
+		const prompt = buildSystemPrompt({
+			decisionDriven: true,
+			decisionSessionPhase: "nudge",
+			selectedTools: ["ask_decision", "write"],
+			toolSnippets: { ask_decision: "Ask the classifier", write: "Write" },
+			skills: [],
+			contextFiles: [],
+			cwd: "/tmp",
+		});
+		expect(prompt).toContain("Phase: nudge");
+		expect(prompt).toContain("goal_clear");
 	});
 
 	it("keeps the inline skill index when decision mode is off", () => {

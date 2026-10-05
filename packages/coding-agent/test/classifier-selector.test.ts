@@ -95,11 +95,12 @@ describe("classifier selector", () => {
 	it("session classifier overrides the saved default and persists on request", async () => {
 		const h = await createClassifierHarness();
 		const [first] = await h.session.modelRuntime.getAvailableOfType("classifier");
-		expect(h.session.classifierModel).toBeUndefined();
+		// Built-in OpenRouter free default applies until a session pick or saved override.
+		expect(h.session.classifierModel?.id).toBe("inception/mercury-decide:free");
 
 		await h.session.setClassifierModel(first);
 		expect(h.session.classifierModel).toBe(first);
-		expect(h.settingsManager.getDefaultClassifierModel()).toBeUndefined();
+		expect(h.settingsManager.getGlobalSettings().defaultClassifierModel).toBeUndefined();
 
 		await h.session.setClassifierModel(first, { persist: true });
 		expect(h.settingsManager.getDefaultClassifierProvider()).toBe(first.provider);
@@ -121,14 +122,26 @@ describe("classifier selector", () => {
 		});
 		expect(h.session.classifierModel?.id).toBe("jev-latest");
 	});
+
+	it("falls back to the built-in OpenRouter free classifier when no default is saved", async () => {
+		const h = await createClassifierHarness();
+		expect(h.settingsManager.getGlobalSettings().defaultClassifierProvider).toBeUndefined();
+		expect(h.session.classifierModel?.provider).toBe("openrouter");
+		expect(h.session.classifierModel?.id).toBe("inception/mercury-decide:free");
+	});
 });
 
 describe("classifier default settings", () => {
+	it("defaults to OpenRouter free mercury-decide when unset", () => {
+		const settings = SettingsManager.inMemory();
+		expect(settings.getDefaultClassifierProvider()).toBe("openrouter");
+		expect(settings.getDefaultClassifierModel()).toBe("inception/mercury-decide:free");
+		expect(settings.getGlobalSettings().defaultClassifierProvider).toBeUndefined();
+		expect(settings.getGlobalSettings().defaultClassifierModel).toBeUndefined();
+	});
+
 	it("round-trips defaultClassifierProvider and defaultClassifierModel", () => {
 		const settings = SettingsManager.inMemory();
-		expect(settings.getDefaultClassifierProvider()).toBeUndefined();
-		expect(settings.getDefaultClassifierModel()).toBeUndefined();
-
 		settings.setDefaultClassifierAndProvider("typesafe", "jev-latest");
 
 		expect(settings.getDefaultClassifierProvider()).toBe("typesafe");
